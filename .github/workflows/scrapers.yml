@@ -1,12 +1,17 @@
-name: Cloud Scrapers (TCEs)
+name: Scrapers TCE (Paralelo por Ano)
 
-# Summary: Trigger the script manually from the Actions tab
 on:
   workflow_dispatch: 
 
 jobs:
   scrape_data:
     runs-on: ubuntu-latest
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        estado: [rj, rs] # Nomes dos seus scripts: webscraper_rj.py, webscraper_rs.py
+        ano: ['2020', '2021', '2022', '2023', '2024', '2025'] # Os anos que deseja baixar
 
     steps:
       - name: Checkout repository
@@ -22,18 +27,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 selenium
 
-      - name: Run Scraper RS
-        run: python webscraper_rs.py
-        continue-on-error: true
-        
-      - name: Run Scraper RJ
-        run: python webscraper_rj.py
-        continue-on-error: true
+      # Summary: Runs the script passing the matrix year as an environment variable
+      - name: Run Scraper ${{ matrix.estado }} - Ano ${{ matrix.ano }}
+        env:
+          TARGET_YEAR: ${{ matrix.ano }}
+        run: python webscraper_${{ matrix.estado }}.py
 
-      - name: Upload Data Artifacts
+      # Summary: Uploads a specific zip file for each state and year
+      - name: Upload Data Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Dados_TCEs_Extraidos
-          # This will capture all folders starting with "Dados_"
+          name: Dados_TCE_${{ matrix.estado }}_${{ matrix.ano }}
           path: Dados_*/ 
           retention-days: 7
