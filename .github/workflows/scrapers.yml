@@ -24,11 +24,11 @@ jobs:
 
 
       - name: Run Scraper RJ
-        run: python tce_rj.py
+        run: python webscraper_rj.py
         continue-on-error: true
 
       - name: Run Scraper RS
-        run: python tce_rs.py
+        run: python webscraper_rs.py
         continue-on-error: true
 
       - name: Upload Data Artifacts
