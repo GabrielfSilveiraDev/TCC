@@ -22,12 +22,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests beautifulsoup4 selenium
 
-      - name: Run Scraper RJ
-        run: python webscraper_rj.py
-        continue-on-error: true
-
       - name: Run Scraper RS
         run: python webscraper_rs.py
+        continue-on-error: true
+        
+      - name: Run Scraper RJ
+        run: python webscraper_rj.py
         continue-on-error: true
 
       - name: Upload Data Artifacts
