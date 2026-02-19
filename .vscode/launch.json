@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "python": "C:\\Users\\gabri\\AppData\\Local\\Programs\\Python\\Python313\\python.exe",  // Caminho explícito (ajuste para o seu)
+            "console": "integratedTerminal"
+        }
+    ]
+}
