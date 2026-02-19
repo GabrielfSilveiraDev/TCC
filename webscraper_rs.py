@@ -1,7 +1,7 @@
 import json
 import os
 import time
-import re # Importamos Regex para limpar os dados
+import re
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -12,25 +12,34 @@ from selenium.webdriver.support import expected_conditions as EC
 # --- CONFIGURAÇÕES ---
 URL_BASE = "https://portal.tce.rs.gov.br/aplicprod/f?p=10200:1:::NO:::"
 OUTPUT_FOLDER = "Dados_RS"
-ANO_LIMITE = 2020 # Irá baixar até Janeiro de 2020 (inclusive)
+ANO_LIMITE = 2020 
+
+if not os.path.exists(OUTPUT_FOLDER):
+    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+    print(f"📁 Pasta '{OUTPUT_FOLDER}' verificada/criada.")
 
 # --- FUNÇÕES AUXILIARES ---
 
-def setup_driver():
+def setup_github_driver():
+    """
+    Summary: Configures the headless Chrome WebDriver for GitHub Actions environment.
+    Changes: Removed Colab specific settings. Relies on standard Selenium Manager.
+    """
     options = Options()
-    options.add_argument("--headless=new") # Descomente para não ver o navegador
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1920,1080")
-    driver = webdriver.Chrome(options=options)
-    return driver
+    options.add_argument("--headless=new") 
+    options.add_argument("--no-sandbox") 
+    options.add_argument("--disable-dev-shm-usage") 
+    options.add_argument("--window-size=1920,1080") 
+    options.add_argument("--disable-gpu") 
+    
+    return webdriver.Chrome(options=options)
 
 def esperar_loading_apex(driver):
-    """Espera o spinner de carregamento (u-Processing) sumir."""
+    """
+    Summary: Waits for the Apex loading spinner (u-Processing) to disappear.
+    """
     try:
-        # Espera aparecer
         WebDriverWait(driver, 2).until(EC.visibility_of_element_located((By.CLASS_NAME, "u-Processing")))
-        # Espera sumir
         WebDriverWait(driver, 30).until(EC.invisibility_of_element_located((By.CLASS_NAME, "u-Processing")))
     except:
         pass
@@ -38,51 +47,54 @@ def esperar_loading_apex(driver):
 
 def extrair_ano_seguro(texto):
     """
-    Usa Regex para encontrar 4 dígitos após uma barra, ignorando espaços.
-    Ex: "  05 / 2025 \n" -> Retorna 2025
+    Summary: Uses Regex to find a 4-digit year after a slash.
     """
-    # Procura por uma barra /, qualquer coisa (.*?), e então 4 digitos (\d{4})
     match = re.search(r'/.*?(\d{4})', texto)
     if match:
         return int(match.group(1))
     return None
 
-def salvar_registro_no_mes_correto(registro):
+def flush_buffer_to_disk(buffer_dados):
     """
-    Salva o registro no arquivo JSON correspondente ao mês/ano.
+    Summary: Optimizes I/O by writing accumulated records to local disk in batches.
+    Changes: Renamed from drive to disk to reflect standard local storage.
     """
-    mes_ano = registro.get("mes_ano")
-    if not mes_ano: return
-
-    # Remove barras e espaços para nome de arquivo seguro
-    safe_date = mes_ano.replace('/', '_').strip()
-    nome_arquivo = f"servidores_tce_rs_{safe_date}.json"
+    if not buffer_dados: return
     
-    if not os.path.exists(OUTPUT_FOLDER):
-        os.makedirs(OUTPUT_FOLDER)
+    for mes_ano, registros in buffer_dados.items():
+        safe_date = mes_ano.replace('/', '_').strip()
+        nome_arquivo = f"servidores_tce_rs_{safe_date}.json"
+        caminho_arquivo = os.path.join(OUTPUT_FOLDER, nome_arquivo)
         
-    caminho_arquivo = os.path.join(OUTPUT_FOLDER, nome_arquivo)
-
-    dados_existentes = []
-    if os.path.exists(caminho_arquivo):
+        dados_existentes = []
+        if os.path.exists(caminho_arquivo):
+            try:
+                with open(caminho_arquivo, 'r', encoding='utf-8') as f:
+                    dados_existentes = json.load(f)
+            except Exception as e:
+                print(f"    ⚠️ Erro ao ler arquivo existente {nome_arquivo}: {e}")
+        
+        dados_existentes.extend(registros)
+        
         try:
-            with open(caminho_arquivo, 'r', encoding='utf-8') as f:
-                dados_existentes = json.load(f)
-        except: pass
+            with open(caminho_arquivo, 'w', encoding='utf-8') as f:
+                json.dump(dados_existentes, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"    ❌ Erro ao salvar {nome_arquivo}: {e}")
+            
+    buffer_dados.clear()
+    print(f"  💾 Lote salvo no disco com sucesso!")
 
-    dados_existentes.append(registro)
-
-    try:
-        with open(caminho_arquivo, 'w', encoding='utf-8') as f:
-            json.dump(dados_existentes, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        print(f"    ❌ Erro ao salvar: {e}")
-
-def extrair_dados_da_tela(driver, mes_ano_texto):
-    dados = {"mes_ano": mes_ano_texto.strip()}
+def extrair_dados_da_tela(driver, mes_ano_texto, nome_servidor):
+    """
+    Summary: Extracts financial data from specific span IDs.
+    """
+    dados = {
+        "mes_ano": mes_ano_texto.strip(),
+        "nome_servidor": nome_servidor 
+    }
     
     try:
-        # Mapeamento dos IDs para nomes legíveis
         mapa_ids = {
             "P7_NOME": "nome",
             "P7_CARGO": "cargo",
@@ -112,73 +124,71 @@ def extrair_dados_da_tela(driver, mes_ano_texto):
     return dados
 
 def processar_servidor(driver, url_servidor, nome_servidor):
-    print(f"  👤 {nome_servidor}...")
+    """
+    Summary: Processes a single server's historical data and returns a list of records.
+    """
+    print(f"  👤 [{nome_servidor}] Lendo histórico...", end='\r')
+    registros_servidor = []
     
     try:
         driver.get(url_servidor)
         esperar_loading_apex(driver)
         
-        # Localiza o Select
         select_elem = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.ID, "P7_PERIODO"))
         )
         select = Select(select_elem)
         
-        # --- LÓGICA DE FILTRO CORRIGIDA ---
         todas_opcoes_texto = [opt.text for opt in select.options]
         datas_validas = []
         
         for texto in todas_opcoes_texto:
             ano = extrair_ano_seguro(texto)
-            
-            if ano:
-                if ano >= ANO_LIMITE:
-                    datas_validas.append(texto)
-                # else:
-                #    print(f"     Ignorando {texto} (Ano < {ANO_LIMITE})")
+            if ano and ano >= ANO_LIMITE:
+                datas_validas.append(texto)
         
-        print(f"    📅 Histórico filtrado: {len(datas_validas)} meses (Até {ANO_LIMITE}).")
-        # ----------------------------------
+        print(f"  👤 [{nome_servidor}] Extraindo {len(datas_validas)} meses...    ")
 
-        # Itera apenas nas datas filtradas
         for data_str in datas_validas:
             try:
-                # Reencontra elemento (DOM refresh)
                 select_elem = driver.find_element(By.ID, "P7_PERIODO")
                 select = Select(select_elem)
                 
-                # Seleciona
                 select.select_by_visible_text(data_str)
                 esperar_loading_apex(driver)
                 
-                # Extrai e Salva
-                registro = extrair_dados_da_tela(driver, data_str)
-                salvar_registro_no_mes_correto(registro)
+                registro = extrair_dados_da_tela(driver, data_str, nome_servidor)
+                registros_servidor.append(registro)
                 
             except Exception as e:
-                print(f"    ❌ Falha ao processar mês {data_str}: {e}")
+                print(f"    ❌ Falha ao processar mês {data_str}: {type(e).__name__}")
                 continue
 
     except Exception as e:
-        print(f"  ❌ Erro ao acessar perfil: {e}")
+        print(f"  ❌ Erro ao acessar perfil {nome_servidor}: {type(e).__name__}")
+        
+    return registros_servidor
 
 def main():
-    if not os.path.exists(OUTPUT_FOLDER):
-        os.makedirs(OUTPUT_FOLDER)
-        
+    """
+    Summary: Main execution loop for scraping TCE-RS on GitHub Actions.
+    """
     start_time = datetime.now()
     print(f"⏱️ Iniciando em {start_time.strftime('%H:%M:%S')}")
     
-    driver = setup_driver()
+    driver = setup_github_driver()
     urls_processadas = set()
+    buffer_por_mes = {} 
+    servidores_processados_lote = 0
+    BATCH_SIZE = 20 
     
     try:
         driver.get(URL_BASE)
-        print("🌐 Acessando lista...")
+        print("🌐 Acessando lista de servidores...")
         esperar_loading_apex(driver)
         
+        pagina = 1
         while True:
-            # Raspa links da página atual
             links_servidores = []
             try:
                 rows = driver.find_elements(By.CSS_SELECTOR, "table.a-IRR-table tbody tr")
@@ -193,37 +203,57 @@ def main():
                         except: pass
             except: pass
 
-            print(f"\n📄 Página: {len(links_servidores)} servidores encontrados.")
+            print(f"\n📄 Página {pagina}: {len(links_servidores)} servidores encontrados na tabela.")
 
-            # Processa servidores
             for nome, url in links_servidores:
                 if url in urls_processadas: continue
                 
-                # Nova aba para não perder a lista
                 driver.execute_script("window.open('');")
                 driver.switch_to.window(driver.window_handles[1])
                 
-                processar_servidor(driver, url, nome)
+                registros_extraidos = processar_servidor(driver, url, nome)
+                
+                for reg in registros_extraidos:
+                    mes_ano = reg.get("mes_ano")
+                    if mes_ano:
+                        if mes_ano not in buffer_por_mes:
+                            buffer_por_mes[mes_ano] = []
+                        buffer_por_mes[mes_ano].append(reg)
                 
                 driver.close()
                 driver.switch_to.window(driver.window_handles[0])
                 urls_processadas.add(url)
+                servidores_processados_lote += 1
+                
+                if servidores_processados_lote >= BATCH_SIZE:
+                    print(f"  🔄 Limite de {BATCH_SIZE} servidores atingido. Descarregando buffer...")
+                    flush_buffer_to_disk(buffer_por_mes)
+                    servidores_processados_lote = 0
 
-            # Próxima página
             try:
-                btn_next = driver.find_element(By.CSS_SELECTOR, "button.a-IRR-button--pagination[title='Próximo']")
+                btn_next = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, "button.a-IRR-button--pagination[title='Próximo']"))
+                )
                 if not btn_next.is_displayed():
-                    print("🏁 Fim da lista.")
+                    print("🏁 Fim da lista (Botão Próximo invisível).")
                     break
+                
                 driver.execute_script("arguments[0].click();", btn_next)
                 esperar_loading_apex(driver)
-                time.sleep(1)
-            except:
-                print("🏁 Fim (Botão Próximo não encontrado).")
+                pagina += 1
+            except Exception as e:
+                print("🏁 Fim (Botão Próximo não encontrado ou inativo).")
                 break
+                
+        if buffer_por_mes:
+            print(f"  🔄 Processamento concluído. Descarregando registros finais...")
+            flush_buffer_to_disk(buffer_por_mes)
 
     except Exception as e:
         print(f"❌ Erro Fatal: {e}")
+        if buffer_por_mes:
+            print(f"  🔄 Salvando buffer de emergência...")
+            flush_buffer_to_disk(buffer_por_mes)
     finally:
         driver.quit()
         end = datetime.now()
