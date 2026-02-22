@@ -2,6 +2,7 @@ import json
 import os
 import time
 import re
+import subprocess # Changes: Added to execute rclone commands
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -19,9 +20,10 @@ if not os.path.exists(OUTPUT_FOLDER):
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     print(f"📁 Folder '{OUTPUT_FOLDER}' verified/created.")
 
-def setup_github_driver():
+def setup_server_driver():
     """
     Summary: Configures Chrome WebDriver with eager loading to prevent renderer timeouts.
+    Changes: Renamed to setup_server_driver.
     """
     options = Options()
     options.add_argument("--headless=new") 
@@ -55,32 +57,41 @@ def extrair_ano_seguro(texto):
     match = re.search(r'/.*?(\d{4})', texto)
     return int(match.group(1)) if match else None
 
-def flush_buffer_to_disk(buffer_dados):
+def flush_buffer_to_drive(buffer_dados):
     """
-    Summary: Writes accumulated records to local disk in batches.
+    Summary: Saves accumulated records to a unique batch file and moves it to Google Drive to save disk space.
+    Changes: Switched from appending existing files to creating unique chunk files. Added subprocess for rclone.
     """
     if not buffer_dados: return
-    for mes_ano, registros in buffer_dados.items():
-        nome_arquivo = f"servidores_tce_rs_{mes_ano.replace('/', '_').strip()}.json"
-        caminho_arquivo = os.path.join(OUTPUT_FOLDER, nome_arquivo)
+    
+    # Flatten the dictionary into a single list for the batch
+    lote_dados = []
+    for registros in buffer_dados.values():
+        lote_dados.extend(registros)
         
-        dados_existentes = []
-        if os.path.exists(caminho_arquivo):
-            try:
-                with open(caminho_arquivo, 'r', encoding='utf-8') as f:
-                    dados_existentes = json.load(f)
-            except: pass
+    # Create a unique filename based on timestamp to avoid merging issues
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    nome_arquivo = f"servidores_tce_rs_lote_{timestamp}.json"
+    caminho_arquivo = os.path.join(OUTPUT_FOLDER, nome_arquivo)
+    
+    try:
+        # 1. Save locally
+        with open(caminho_arquivo, 'w', encoding='utf-8') as f:
+            json.dump(lote_dados, f, ensure_ascii=False, indent=4)
         
-        dados_existentes.extend(registros)
+        print(f"  💾 Batch saved to disk: {nome_arquivo} ({len(lote_dados)} records)")
         
-        try:
-            with open(caminho_arquivo, 'w', encoding='utf-8') as f:
-                json.dump(dados_existentes, f, ensure_ascii=False, indent=4)
-        except Exception as e:
-            print(f"    ❌ Error saving {nome_arquivo}: {e}")
-            
+        # 2. Move to Drive
+        print(f"  ☁️ Uploading batch to Google Drive...")
+        subprocess.run(["rclone", "move", caminho_arquivo, "meudrive:TCC_Scraping/Dados_RS/"], check=True)
+        print(f"  ✅ Upload complete and local file deleted.")
+        
+    except subprocess.CalledProcessError as e:
+        print(f"    ❌ Error uploading batch to Drive: {e}")
+    except Exception as e:
+        print(f"    ❌ Error saving batch: {e}")
+        
     buffer_dados.clear()
-    print(f"  💾 Batch saved to disk successfully!")
 
 def extrair_dados_da_tela(driver, mes_ano_texto, nome_servidor):
     """
@@ -105,7 +116,6 @@ def extrair_dados_da_tela(driver, mes_ano_texto, nome_servidor):
 def processar_servidor(driver, url_servidor, nome_servidor):
     """
     Summary: Processes a single server, catching page load timeouts to prevent script death.
-    Changes: Filters dates using TARGET_YEAR from environment variables.
     """
     print(f"  👤 [{nome_servidor}] Reading history...")
     registros_servidor = []
@@ -149,10 +159,10 @@ def processar_servidor(driver, url_servidor, nome_servidor):
 
 def main():
     """
-    Summary: Main execution loop for scraping TCE-RS on GitHub Actions.
+    Summary: Main execution loop for scraping TCE-RS on a local server.
     """
     print(f"⏱️ Starting at {datetime.now().strftime('%H:%M:%S')}")
-    driver = setup_github_driver()
+    driver = setup_server_driver()
     urls_processadas, buffer_por_mes = set(), {}
     servidores_processados_lote, BATCH_SIZE = 0, 20
     
@@ -196,7 +206,7 @@ def main():
                 servidores_processados_lote += 1
                 
                 if servidores_processados_lote >= BATCH_SIZE:
-                    flush_buffer_to_disk(buffer_por_mes)
+                    flush_buffer_to_drive(buffer_por_mes)
                     servidores_processados_lote = 0
 
             try:
@@ -207,10 +217,10 @@ def main():
                 pagina += 1
             except: break
                 
-        flush_buffer_to_disk(buffer_por_mes)
+        flush_buffer_to_drive(buffer_por_mes)
     except Exception as e:
         print(f"❌ Fatal Error: {e}")
-        flush_buffer_to_disk(buffer_por_mes)
+        flush_buffer_to_drive(buffer_por_mes)
     finally:
         driver.quit()
 
