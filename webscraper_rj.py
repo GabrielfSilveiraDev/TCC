@@ -2,6 +2,7 @@ import time
 import json
 import requests
 import os
+import subprocess # Changes: Added to execute rclone commands
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -18,9 +19,10 @@ if not os.path.exists(OUTPUT_FOLDER):
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     print(f"📁 Folder '{OUTPUT_FOLDER}' verified/created.")
 
-def setup_github_driver():
+def setup_server_driver():
     """
-    Summary: Configures the headless Chrome WebDriver for GitHub Actions environment.
+    Summary: Configures the headless Chrome WebDriver for the Ubuntu server environment.
+    Changes: Renamed from setup_github_driver to setup_server_driver.
     """
     options = Options()
     options.add_argument("--headless=new") 
@@ -73,12 +75,11 @@ def parse_valor_br(v):
 
 def main():
     """
-    Summary: Main scraper function for TCE-RJ using Selenium on GitHub Actions.
-    Changes: Filters references by TARGET_YEAR from environment variables.
+    Summary: Main scraper function for TCE-RJ using Selenium on a local server.
+    Changes: Implemented rclone subprocess to move files to Google Drive and free up local disk space.
     """
     lista_referencias = get_api_references()
     
-    # Filter by target year passed by GitHub Actions
     target_year = os.environ.get("TARGET_YEAR")
     if target_year:
         lista_referencias = [ref for ref in lista_referencias if ref.endswith(f"/{target_year}")]
@@ -88,7 +89,7 @@ def main():
     if not lista_referencias:
         return
 
-    driver = setup_github_driver()
+    driver = setup_server_driver()
     wait = WebDriverWait(driver, 20)
 
     print("🌍 Accessing portal...")
@@ -225,9 +226,18 @@ def main():
             caminho_completo = os.path.join(OUTPUT_FOLDER, nome_arquivo)
             
             try:
+                # 1. Save locally
                 with open(caminho_completo, "w", encoding="utf-8") as f:
                     json.dump(dados_do_mes, f, ensure_ascii=False, indent=4)
                 print(f"💾 Saved file: {nome_arquivo} ({len(dados_do_mes)} records)")
+                
+                # 2. Upload and delete locally (rclone move)
+                print(f"  ☁️ Uploading {nome_arquivo} to Google Drive...")
+                subprocess.run(["rclone", "move", caminho_completo, "meudrive:TCC_Scraping/Dados_RJ/"], check=True)
+                print(f"  ✅ Upload complete and local file deleted.")
+                
+            except subprocess.CalledProcessError as e:
+                print(f"❌ Error uploading to Drive: {e}")
             except Exception as e:
                 print(f"❌ Error saving {nome_arquivo}: {e}")
 
