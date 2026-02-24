@@ -2,7 +2,7 @@ import time
 import json
 import requests
 import os
-import subprocess # Changes: Added to execute rclone commands
+import subprocess
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -11,6 +11,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 
 # --- CONFIGURATIONS ---
 OUTPUT_FOLDER = "Dados_RJ"
@@ -21,8 +22,8 @@ if not os.path.exists(OUTPUT_FOLDER):
 
 def setup_server_driver():
     """
-    Summary: Configures the headless Chrome WebDriver for the Ubuntu server environment.
-    Changes: Renamed from setup_github_driver to setup_server_driver.
+    Summary: Configures the headless Chrome WebDriver with aggressive memory management.
+    Changes: Added eager loading and rasterizer disable to prevent OOM kills on 1GB RAM servers.
     """
     options = Options()
     options.add_argument("--headless=new") 
@@ -31,7 +32,14 @@ def setup_server_driver():
     options.add_argument("--window-size=1920,1080") 
     options.add_argument("--disable-gpu") 
     
-    return webdriver.Chrome(options=options)
+    # Aggressive memory and loading optimizations for 1GB RAM
+    options.add_argument("--disable-software-rasterizer") 
+    options.add_argument("--disable-extensions")
+    options.page_load_strategy = 'eager' 
+    
+    driver = webdriver.Chrome(options=options)
+    driver.set_page_load_timeout(60) 
+    return driver
 
 def wait_angular_loading(driver):
     """
@@ -76,7 +84,7 @@ def parse_valor_br(v):
 def main():
     """
     Summary: Main scraper function for TCE-RJ using Selenium on a local server.
-    Changes: Implemented rclone subprocess to move files to Google Drive and free up local disk space.
+    Changes: Included per-month rclone upload to prevent local disk exhaustion.
     """
     lista_referencias = get_api_references()
     
@@ -93,10 +101,15 @@ def main():
     wait = WebDriverWait(driver, 20)
 
     print("🌍 Accessing portal...")
-    driver.get("https://tcerjtransparencia.admrh.inf.br/rhsysportaltransp/")
+    try:
+        driver.get("https://tcerjtransparencia.admrh.inf.br/rhsysportaltransp/")
+    except TimeoutException:
+        print("⚠️ Initial timeout. Forcing stop of heavy scripts/images...")
+        driver.execute_script("window.stop();")
 
     wait.until(EC.presence_of_element_located((By.CLASS_NAME, "ui-select-container")))
 
+    # --- PER MONTH LOOP ---
     for referencia in lista_referencias:
         print(f"\n🔵 Starting competency: {referencia}")
         
@@ -121,7 +134,7 @@ def main():
                 continue
 
         except Exception as e:
-            print(f"❌ Error selecting date {referencia}: {e}")
+            print(f"❌ Error selecting date {referencia}: {type(e).__name__}")
             continue
 
         pagina = 1
@@ -200,7 +213,10 @@ def main():
                     wait.until(EC.invisibility_of_element_located((By.CSS_SELECTOR, ".valores")))
 
                 except Exception as e:
-                    ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                    try:
+                        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                    except:
+                        pass
                     continue
 
             try:
@@ -220,21 +236,22 @@ def main():
                 print(f"  ✅ End of pages (Next button not found).")
                 break
         
+        # --- UPLOAD E LIMPEZA (POR MÊS) ---
         if dados_do_mes:
             nome_seguro = referencia.replace('/', '_')
             nome_arquivo = f"servidores_tce_rj_completo_{nome_seguro}.json"
             caminho_completo = os.path.join(OUTPUT_FOLDER, nome_arquivo)
             
             try:
-                # 1. Save locally
+                # 1. Saves the JSON file locally
                 with open(caminho_completo, "w", encoding="utf-8") as f:
                     json.dump(dados_do_mes, f, ensure_ascii=False, indent=4)
-                print(f"💾 Saved file: {nome_arquivo} ({len(dados_do_mes)} records)")
+                print(f"💾 Saved file locally: {nome_arquivo} ({len(dados_do_mes)} records)")
                 
-                # 2. Upload and delete locally (rclone move)
+                # 2. Moves the file to Google Drive (rclone move deletes the source file)
                 print(f"  ☁️ Uploading {nome_arquivo} to Google Drive...")
                 subprocess.run(["rclone", "move", caminho_completo, "meudrive:TCC_Scraping/Dados_RJ/"], check=True)
-                print(f"  ✅ Upload complete and local file deleted.")
+                print(f"  ✅ Upload complete. Local file automatically deleted to save RAM/Disk.")
                 
             except subprocess.CalledProcessError as e:
                 print(f"❌ Error uploading to Drive: {e}")
