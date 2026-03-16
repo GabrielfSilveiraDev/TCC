@@ -3,15 +3,13 @@ from bs4 import BeautifulSoup
 import json
 import os
 import time
+import subprocess
 from datetime import datetime
 
-# --- Configurações ---
-BASE_URL = "https://www.tce.sp.gov.br/transparencia-tcesp/gestao-pessoas/remuneracao/tabela"
-OUTPUT_FOLDER = "Dados_SP"
+URL_BASE = "https://www.tce.sp.gov.br/transparencia-tcesp/gestao-pessoas/remuneracao/tabela"
+PASTA_SAIDA = "Dados_SP"
 
-# Mapeamento conforme o HTML que você forneceu:
-# <option value="1">2025</option> ... <option value="5">2021</option>
-YEAR_MAP = {
+MAPA_ANOS = {
     2025: 1,
     2024: 2,
     2023: 3,
@@ -19,170 +17,168 @@ YEAR_MAP = {
     2021: 5
 }
 
-# Códigos de situação (não mudaram)
-SITUATIONS = {
+SITUACOES = {
     1: "ATIVO",
     2: "INATIVO"
 }
 
-# --- Funções Auxiliares ---
-
-def parse_num(txt):
-    """Converte string de moeda (PT-BR) para float."""
-    if not txt:
+def limpar_numero(texto):
+    """
+    Summary: Converte string de formato de moeda brasileira para float.
+    Alteracoes: Nome e logica traduzidos para o portugues.
+    """
+    if not texto:
         return 0.0
-    t = txt.strip().replace(".", "").replace(",", ".")
+    limpo = texto.strip().replace(".", "").replace(",", ".")
     try:
-        return float(t)
-    except:
+        return float(limpo)
+    except Exception:
         return 0.0
 
-def fetch_data_for_month(year_label, year_id, month):
+def buscar_dados_mes(ano_rotulo, ano_id, mes):
     """
-    Busca dados para um mês/ano específico em todas as situações.
-    Recebe o ANO REAL (label) para salvar no JSON, e o ID (1-5) para enviar na requisição.
+    Summary: Busca e pagina os dados de um mes e ano especifico para todas as situacoes.
+    Alteracoes: Logs limpos e variaveis padronizadas.
     """
-    month_data = []
+    dados_mes = []
     
-    for cod_situacao, nome_situacao in SITUATIONS.items():
+    for cod_situacao, nome_situacao in SITUACOES.items():
         print(f"  > Processando: {nome_situacao}...")
         
-        page = 1
+        pagina = 1
         while True:
-            # Params para o GET
-            # Note que usamos 'year_id' (1 a 5) aqui
-            params = {
-                "vencimentos_ano": year_id,
-                "Mes": month,
+            parametros = {
+                "vencimentos_ano": ano_id,
+                "Mes": mes,
                 "Situacao": cod_situacao,
                 "Nome": "",
                 "Identificacao": 1,
-                "page": page
+                "page": pagina
             }
             
             try:
-                res = requests.get(BASE_URL, params=params, timeout=30)
-                res.raise_for_status()
+                resposta = requests.get(URL_BASE, params=parametros, timeout=30)
+                resposta.raise_for_status()
             except requests.RequestException as e:
-                print(f"    ! Erro na requisição (Pág {page}): {e}")
+                print(f"    Erro na requisicao (Pagina {pagina}): {e}")
                 break
 
-            soup = BeautifulSoup(res.text, "html.parser")
-            tabela = soup.select_one("div.table-responsive table.table-hover.table-striped tbody")
+            sopa = BeautifulSoup(resposta.text, "html.parser")
+            tabela = sopa.select_one("div.table-responsive table.table-hover.table-striped tbody")
             
-            # Se a tabela não existe, acabaram as páginas ou não tem dados
             if not tabela:
                 break
             
-            rows = tabela.find_all("tr")
-            if not rows:
+            linhas = tabela.find_all("tr")
+            if not linhas:
                 break
             
-            count_new = 0
-            for tr in rows:
+            for tr in linhas:
                 td = tr.find_all("td")
                 if len(td) < 21:
                     continue
 
-                # Extração dos dados
                 nome = td[3].text.strip()
                 cargo = td[20].text.strip()
                 
-                # Lista de Proventos
-                proventos_raw = [
+                proventos_brutos = [
                     ("Vencimentos", td[5].text.strip()),
                     ("Vantagens Pessoais", td[6].text.strip()),
                     ("Outras Verbas", td[7].text.strip()),
                     ("Eventuais", td[11].text.strip()),
-                    ("Abono Permanência", td[12].text.strip()),
-                    ("Auxílios", td[13].text.strip()),
-                    ("1/3 Férias", td[14].text.strip()),
-                    ("13º Salário", td[16].text.strip()),
-                    ("13º Abono", td[17].text.strip()),
+                    ("Abono Permanencia", td[12].text.strip()),
+                    ("Auxilios", td[13].text.strip()),
+                    ("1/3 Ferias", td[14].text.strip()),
+                    ("13 Salario", td[16].text.strip()),
+                    ("13 Abono", td[17].text.strip()),
                 ]
-                proventos = [{"descricao": desc, "valor": val} for desc, val in proventos_raw if parse_num(val) != 0]
+                proventos = [{"descricao": desc, "valor": val} for desc, val in proventos_brutos if limpar_numero(val) != 0]
 
-                # Lista de Descontos
-                descontos_raw = [
+                descontos_brutos = [
                     ("Redutor", td[8].text.strip()),
                     ("Descontos Legais", td[10].text.strip()),
-                    ("Desconto Férias", td[15].text.strip()),
-                    ("Desconto 13º", td[18].text.strip()),
+                    ("Desconto Ferias", td[15].text.strip()),
+                    ("Desconto 13", td[18].text.strip()),
                 ]
-                descontos = [{"descricao": desc, "valor": val} for desc, val in descontos_raw if parse_num(val) != 0]
+                descontos = [{"descricao": desc, "valor": val} for desc, val in descontos_brutos if limpar_numero(val) != 0]
 
-                # Totais
                 total_prov = td[9].text.strip()
                 sal_liq = td[19].text.strip()
                 
-                # Cálculo manual do total de descontos para string
-                total_desc_float = sum(parse_num(d["valor"]) for d in descontos)
+                total_desc_float = sum(limpar_numero(d["valor"]) for d in descontos)
                 total_desc_str = f"{total_desc_float:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-                server_obj = {
+                obj_servidor = {
                     "nome": nome,
                     "cargo": cargo,
-                    "mes_ano": f"{month:02d}/{year_label}", # Usa o ano real (ex: 2025)
+                    "mes_ano": f"{mes:02d}/{ano_rotulo}",
                     "tipo": nome_situacao,
                     "proventos": proventos,
                     "descontos": descontos,
                     "total_proventos": total_prov,
                     "total_descontos": total_desc_str,
                     "salario_liquido": sal_liq,
-                    "url_origem": res.url
+                    "url_origem": resposta.url
                 }
                 
-                month_data.append(server_obj)
-                count_new += 1
+                dados_mes.append(obj_servidor)
             
-            next_page_link = soup.find("a", {"rel": "next"})
-            if not next_page_link:
+            link_prox_pagina = sopa.find("a", {"rel": "next"})
+            if not link_prox_pagina:
                 break
             
-            page += 1
+            pagina += 1
             time.sleep(0.1)
             
-    return month_data
+    return dados_mes
 
-def main():
+def principal():
     """
-    Orquestra a extração usando o YEAR_MAP.
+    Summary: Funcao principal que orquestra a extracao do TCE-SP integrando salvamento e Rclone.
+    Alteracoes: Caminho absoluto e blocos try-except para assegurar continuidade.
     """
-    if not os.path.exists(OUTPUT_FOLDER):
-        os.makedirs(OUTPUT_FOLDER)
-        print(f"Pasta '{OUTPUT_FOLDER}' criada.")
+    if not os.path.exists(PASTA_SAIDA):
+        os.makedirs(PASTA_SAIDA)
+        print(f"Pasta '{PASTA_SAIDA}' criada.")
     
-    start_time = datetime.now()
+    tempo_inicio = datetime.now()
     
-    for year_label, year_id in YEAR_MAP.items():
+    for ano_rotulo, ano_id in MAPA_ANOS.items():
         
-        # Define limite de mês para 2025 (até Outubro)
-        last_month = 10 if year_label == 2025 else 12
+        ultimo_mes = 10 if ano_rotulo == 2025 else 12
         
-        for month in range(1, last_month + 1):
-            print(f"\n=== Iniciando extração: {month:02d}/{year_label} (ID Ano: {year_id}) ===")
+        for mes in range(1, ultimo_mes + 1):
+            print(f"\n=== Iniciando extracao: {mes:02d}/{ano_rotulo} (ID Ano: {ano_id}) ===")
             
-            data = fetch_data_for_month(year_label, year_id, month)
+            dados = buscar_dados_mes(ano_rotulo, ano_id, mes)
             
-            if not data:
-                print(f"Nenhum dado encontrado para {month:02d}/{year_label}.")
+            if not dados:
+                print(f"Nenhum dado encontrado para {mes:02d}/{ano_rotulo}.")
                 continue
             
-            filename = f"servidores_tce_sp_completo_{month:02d}_{year_label}.json"
-            filepath = os.path.join(OUTPUT_FOLDER, filename)
+            nome_arquivo = f"servidores_tce_sp_completo_{mes:02d}_{ano_rotulo}.json"
+            caminho_absoluto = os.path.abspath(os.path.join(PASTA_SAIDA, nome_arquivo))
             
             try:
-                with open(filepath, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=4)
-                print(f"Salvo: {filepath} ({len(data)} registros)")
-            except IOError as e:
-                print(f"Erro ao salvar arquivo: {e}")
+                with open(caminho_absoluto, "w", encoding="utf-8") as f:
+                    json.dump(dados, f, ensure_ascii=False, indent=4)
+                print(f"Salvo localmente: {nome_arquivo} ({len(dados)} registros)")
+
+                comando_rclone = f'rclone move "{caminho_absoluto}" "meudrive:TCC_Scraping/{PASTA_SAIDA}/"'
+                subprocess.run(comando_rclone, shell=True, check=True)
+                print("Upload para o Drive concluido e arquivo local apagado.")
+                
+            except subprocess.CalledProcessError as erro_processo:
+                print(f"Aviso: Rclone retornou erro. Arquivo garantido no HD local. {erro_processo}")
+            except FileNotFoundError:
+                print("Aviso: Rclone nao encontrado no PATH do Windows. Arquivo garantido no HD local.")
+            except Exception as e:
+                print(f"Erro inesperado ao salvar/enviar arquivo: {e}")
             
-            # Delay entre meses
             time.sleep(0.5)
 
-    end_time = datetime.now()
-    print(f"\nExtração finalizada em {end_time - start_time}.")
+    tempo_fim = datetime.now()
+    print(f"\nExtracao finalizada em {tempo_fim - tempo_inicio}.")
 
 if __name__ == "__main__":
-    main()
+    principal()

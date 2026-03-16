@@ -2,7 +2,7 @@ import json
 import os
 import time
 import re
-import subprocess # Changes: Added to execute rclone commands
+import subprocess
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -11,93 +11,87 @@ from selenium.webdriver.support.ui import WebDriverWait, Select
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
-# --- CONFIGURATIONS ---
 URL_BASE = "https://portal.tce.rs.gov.br/aplicprod/f?p=10200:1:::NO:::"
-OUTPUT_FOLDER = "Dados_RS"
+PASTA_SAIDA = "Dados_RS"
 ANO_LIMITE = 2020 
 
-if not os.path.exists(OUTPUT_FOLDER):
-    os.makedirs(OUTPUT_FOLDER, exist_ok=True)
-    print(f"📁 Folder '{OUTPUT_FOLDER}' verified/created.")
+if not os.path.exists(PASTA_SAIDA):
+    os.makedirs(PASTA_SAIDA, exist_ok=True)
+    print(f"Pasta '{PASTA_SAIDA}' verificada/criada.")
 
-def setup_server_driver():
+def configurar_navegador():
     """
-    Summary: Configures Chrome WebDriver with eager loading to prevent renderer timeouts.
-    Changes: Renamed to setup_server_driver.
+    Summary: Configura o navegador Chrome com carregamento rapido para prevenir travamentos em execucoes longas.
+    Alteracoes: Nomes traduzidos para portugues e adaptado para execucao local no Windows.
     """
-    options = Options()
-    options.add_argument("--headless=new") 
-    options.add_argument("--no-sandbox") 
-    options.add_argument("--disable-dev-shm-usage") 
-    options.add_argument("--window-size=1920,1080") 
-    options.add_argument("--disable-gpu") 
-    options.add_argument("--disable-software-rasterizer") 
-    options.add_argument("--disable-extensions")
+    opcoes = Options()
+    opcoes.add_argument("--headless=new") 
+    opcoes.add_argument("--disable-gpu") 
+    opcoes.add_argument("--window-size=1920,1080") 
+    opcoes.add_argument("--disable-software-rasterizer") 
+    opcoes.page_load_strategy = 'eager' 
     
-    options.page_load_strategy = 'eager' 
-    
-    driver = webdriver.Chrome(options=options)
-    driver.set_page_load_timeout(60) 
-    return driver
+    navegador = webdriver.Chrome(options=opcoes)
+    navegador.set_page_load_timeout(60) 
+    return navegador
 
-def esperar_loading_apex(driver):
+def esperar_loading_apex(navegador):
     """
-    Summary: Waits for the Apex loading spinner to disappear.
+    Summary: Aguarda o icone de carregamento do sistema Apex desaparecer da tela.
     """
     try:
-        WebDriverWait(driver, 2).until(EC.visibility_of_element_located((By.CLASS_NAME, "u-Processing")))
-        WebDriverWait(driver, 30).until(EC.invisibility_of_element_located((By.CLASS_NAME, "u-Processing")))
-    except: pass
+        espera = WebDriverWait(navegador, 2)
+        espera.until(EC.visibility_of_element_located((By.CLASS_NAME, "u-Processing")))
+        espera_longa = WebDriverWait(navegador, 30)
+        espera_longa.until(EC.invisibility_of_element_located((By.CLASS_NAME, "u-Processing")))
+    except: 
+        pass
     time.sleep(0.3)
 
 def extrair_ano_seguro(texto):
     """
-    Summary: Uses Regex to find a 4-digit year.
+    Summary: Utiliza expressoes regulares para encontrar um ano de 4 digitos no texto.
     """
-    match = re.search(r'/.*?(\d{4})', texto)
-    return int(match.group(1)) if match else None
+    resultado = re.search(r'/.*?(\d{4})', texto)
+    return int(resultado.group(1)) if resultado else None
 
-def flush_buffer_to_drive(buffer_dados):
+def enviar_lote_para_drive(buffer_dados):
     """
-    Summary: Saves accumulated records to a unique batch file and moves it to Google Drive to save disk space.
-    Changes: Switched from appending existing files to creating unique chunk files. Added subprocess for rclone.
+    Summary: Salva os registros acumulados em um arquivo de lote unico e move para o Google Drive.
+    Alteracoes: Textos traduzidos e emojis removidos. Mantem a exclusao automatica do arquivo local.
     """
     if not buffer_dados: return
     
-    # Flatten the dictionary into a single list for the batch
     lote_dados = []
     for registros in buffer_dados.values():
         lote_dados.extend(registros)
         
-    # Create a unique filename based on timestamp to avoid merging issues
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    nome_arquivo = f"servidores_tce_rs_lote_{timestamp}.json"
-    caminho_arquivo = os.path.join(OUTPUT_FOLDER, nome_arquivo)
+    carimbo_tempo = datetime.now().strftime("%Y%m%d_%H%M%S")
+    nome_arquivo = f"servidores_tce_rs_lote_{carimbo_tempo}.json"
+    caminho_arquivo = os.path.join(PASTA_SAIDA, nome_arquivo)
     
     try:
-        # 1. Save locally
         with open(caminho_arquivo, 'w', encoding='utf-8') as f:
             json.dump(lote_dados, f, ensure_ascii=False, indent=4)
         
-        print(f"  💾 Batch saved to disk: {nome_arquivo} ({len(lote_dados)} records)")
+        print(f"Lote salvo no disco: {nome_arquivo} ({len(lote_dados)} registros)")
         
-        # 2. Move to Drive
-        print(f"  ☁️ Uploading batch to Google Drive...")
-        subprocess.run(["rclone", "move", caminho_arquivo, "meudrive:TCC_Scraping/Dados_RS/"], check=True)
-        print(f"  ✅ Upload complete and local file deleted.")
+        print("Enviando lote para o Google Drive...")
+        subprocess.run(["rclone", "move", caminho_arquivo, f"meudrive:TCC_Scraping/{PASTA_SAIDA}/"], check=True)
+        print("Upload concluido e arquivo local apagado.")
         
     except subprocess.CalledProcessError as e:
-        print(f"    ❌ Error uploading batch to Drive: {e}")
+        print(f"Erro ao enviar lote para o Drive: {e}")
     except Exception as e:
-        print(f"    ❌ Error saving batch: {e}")
+        print(f"Erro ao salvar lote: {e}")
         
     buffer_dados.clear()
 
-def extrair_dados_da_tela(driver, mes_ano_texto, nome_servidor):
+def extrair_dados_da_tela(navegador, texto_mes_ano, nome_servidor):
     """
-    Summary: Extracts financial data from specific span IDs.
+    Summary: Extrai os dados financeiros lendo os IDs especificos dos elementos na pagina do servidor.
     """
-    dados = {"mes_ano": mes_ano_texto.strip(), "nome_servidor": nome_servidor}
+    dados = {"mes_ano": texto_mes_ano.strip(), "nome_servidor": nome_servidor}
     try:
         mapa_ids = {
             "P7_NOME": "nome", "P7_CARGO": "cargo", "P7_CLASSE": "classe", "P7_NIVEL": "nivel",
@@ -107,122 +101,137 @@ def extrair_dados_da_tela(driver, mes_ano_texto, nome_servidor):
             "P7_VL_TERCO_FERIAS": "terco_ferias", "P7_VL_GRATIFICACAO_NATALINA": "gratificacao_natalina",
             "P7_VL_DESCONTOS_LEGAIS": "descontos_legais", "P7_VL_LIQUIDO_APOS_DESCONTOS": "liquido"
         }
-        for elemento in driver.find_elements(By.CSS_SELECTOR, "span.display_only"):
-            elem_id = elemento.get_attribute("id")
-            if elem_id in mapa_ids: dados[mapa_ids[elem_id]] = elemento.text.strip()
-    except: pass
+        for elemento in navegador.find_elements(By.CSS_SELECTOR, "span.display_only"):
+            id_elemento = elemento.get_attribute("id")
+            if id_elemento in mapa_ids: 
+                dados[mapa_ids[id_elemento]] = elemento.text.strip()
+    except: 
+        pass
     return dados
 
-def processar_servidor(driver, url_servidor, nome_servidor):
+def processar_servidor(navegador, url_servidor, nome_servidor):
     """
-    Summary: Processes a single server, catching page load timeouts to prevent script death.
+    Summary: Processa o historico de um unico servidor, capturando timeouts para evitar a quebra do script.
     """
-    print(f"  👤 [{nome_servidor}] Reading history...")
+    print(f"[{nome_servidor}] Lendo historico...")
     registros_servidor = []
     
     try:
         try:
-            driver.get(url_servidor)
+            navegador.get(url_servidor)
         except TimeoutException:
-            driver.execute_script("window.stop();")
+            navegador.execute_script("window.stop();")
             
-        esperar_loading_apex(driver)
+        esperar_loading_apex(navegador)
         
-        select = Select(WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, "P7_PERIODO"))))
+        espera = WebDriverWait(navegador, 10)
+        caixa_selecao = Select(espera.until(EC.presence_of_element_located((By.ID, "P7_PERIODO"))))
         
-        todas_opcoes_texto = [opt.text for opt in select.options]
+        todas_opcoes = [opcao.text for opcao in caixa_selecao.options]
         datas_validas = []
-        target_year = os.environ.get("TARGET_YEAR")
+        ano_alvo = os.environ.get("ANO_ALVO")
         
-        for texto in todas_opcoes_texto:
+        for texto in todas_opcoes:
             ano = extrair_ano_seguro(texto)
             if ano:
-                if target_year:
-                    if ano == int(target_year):
+                if ano_alvo:
+                    if ano == int(ano_alvo):
                         datas_validas.append(texto)
                 elif ano >= ANO_LIMITE:
                     datas_validas.append(texto)
 
-        print(f"  👤 [{nome_servidor}] Extracting {len(datas_validas)} months...")
+        print(f"[{nome_servidor}] Extraindo {len(datas_validas)} meses...")
 
-        for data_str in datas_validas:
+        for texto_data in datas_validas:
             try:
-                select = Select(driver.find_element(By.ID, "P7_PERIODO"))
-                select.select_by_visible_text(data_str)
-                esperar_loading_apex(driver)
-                registros_servidor.append(extrair_dados_da_tela(driver, data_str, nome_servidor))
-            except: continue
+                caixa_selecao = Select(navegador.find_element(By.ID, "P7_PERIODO"))
+                caixa_selecao.select_by_visible_text(texto_data)
+                esperar_loading_apex(navegador)
+                registros_servidor.append(extrair_dados_da_tela(navegador, texto_data, nome_servidor))
+            except: 
+                continue
     except Exception as e:
-        print(f"  ❌ Error on profile: {type(e).__name__}")
+        print(f"Erro no perfil: {type(e).__name__}")
         
     return registros_servidor
 
-def main():
+def principal():
     """
-    Summary: Main execution loop for scraping TCE-RS on a local server.
+    Summary: Funcao principal que orquestra a extracao do portal TCE-RS.
+    Alteracoes: Textos em portugues e fluxo mantido para processamento em lotes.
     """
-    print(f"⏱️ Starting at {datetime.now().strftime('%H:%M:%S')}")
-    driver = setup_server_driver()
-    urls_processadas, buffer_por_mes = set(), {}
-    servidores_processados_lote, BATCH_SIZE = 0, 20
+    print(f"Iniciando as {datetime.now().strftime('%H:%M:%S')}")
+    navegador = configurar_navegador()
+    urls_processadas = set()
+    buffer_por_mes = {}
+    servidores_processados_lote = 0
+    TAMANHO_LOTE = 20
     
     try:
-        print("🌐 Accessing server list...")
+        print("Acessando lista de servidores...")
         try:
-            driver.get(URL_BASE)
+            navegador.get(URL_BASE)
         except TimeoutException:
-            print("  ⚠️ Initial timeout. Forcing stop of heavy scripts/images...")
-            driver.execute_script("window.stop();")
+            print("Timeout inicial. Forcando parada do carregamento...")
+            navegador.execute_script("window.stop();")
 
-        esperar_loading_apex(driver)
+        esperar_loading_apex(navegador)
         
         pagina = 1
         while True:
             links_servidores = []
             try:
-                for row in driver.find_elements(By.CSS_SELECTOR, "table.a-IRR-table tbody tr"):
-                    cols = row.find_elements(By.TAG_NAME, "td")
-                    if cols:
-                        link = cols[0].find_element(By.TAG_NAME, "a")
+                linhas = navegador.find_elements(By.CSS_SELECTOR, "table.a-IRR-table tbody tr")
+                for linha in linhas:
+                    colunas = linha.find_elements(By.TAG_NAME, "td")
+                    if colunas:
+                        link = colunas[0].find_element(By.TAG_NAME, "a")
                         links_servidores.append((link.text.strip(), link.get_attribute("href")))
-            except: pass
+            except: 
+                pass
 
-            print(f"\n📄 Page {pagina}: {len(links_servidores)} servers found.")
+            print(f"\nPagina {pagina}: {len(links_servidores)} servidores encontrados.")
 
             for nome, url in links_servidores:
-                if url in urls_processadas: continue
-                driver.execute_script("window.open('');")
-                driver.switch_to.window(driver.window_handles[1])
+                if url in urls_processadas: 
+                    continue
                 
-                for reg in processar_servidor(driver, url, nome):
-                    mes_ano = reg.get("mes_ano")
+                navegador.execute_script("window.open('');")
+                navegador.switch_to.window(navegador.window_handles[1])
+                
+                for registro in processar_servidor(navegador, url, nome):
+                    mes_ano = registro.get("mes_ano")
                     if mes_ano:
-                        if mes_ano not in buffer_por_mes: buffer_por_mes[mes_ano] = []
-                        buffer_por_mes[mes_ano].append(reg)
+                        if mes_ano not in buffer_por_mes: 
+                            buffer_por_mes[mes_ano] = []
+                        buffer_por_mes[mes_ano].append(registro)
                 
-                driver.close()
-                driver.switch_to.window(driver.window_handles[0])
+                navegador.close()
+                navegador.switch_to.window(navegador.window_handles[0])
                 urls_processadas.add(url)
                 servidores_processados_lote += 1
                 
-                if servidores_processados_lote >= BATCH_SIZE:
-                    flush_buffer_to_drive(buffer_por_mes)
+                if servidores_processados_lote >= TAMANHO_LOTE:
+                    enviar_lote_para_drive(buffer_por_mes)
                     servidores_processados_lote = 0
 
             try:
-                btn_next = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button.a-IRR-button--pagination[title='Próximo']")))
-                if not btn_next.is_displayed(): break
-                driver.execute_script("arguments[0].click();", btn_next)
-                esperar_loading_apex(driver)
+                espera = WebDriverWait(navegador, 5)
+                botao_proximo = espera.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button.a-IRR-button--pagination[title='Próximo']")))
+                if not botao_proximo.is_displayed(): 
+                    break
+                navegador.execute_script("arguments[0].click();", botao_proximo)
+                esperar_loading_apex(navegador)
                 pagina += 1
-            except: break
+            except: 
+                break
                 
-        flush_buffer_to_drive(buffer_por_mes)
+        enviar_lote_para_drive(buffer_por_mes)
     except Exception as e:
-        print(f"❌ Fatal Error: {e}")
-        flush_buffer_to_drive(buffer_por_mes)
+        print(f"Erro Fatal: {e}")
+        enviar_lote_para_drive(buffer_por_mes)
     finally:
-        driver.quit()
+        navegador.quit()
 
 if __name__ == "__main__":
-    main()
+    principal()

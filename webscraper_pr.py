@@ -1,199 +1,209 @@
-import requests
-import json
 import os
 import time
-import urllib3
+import json
+import subprocess
 from datetime import datetime
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support import expected_conditions as EC
 
-# --- Configuração ---
-API_PERIODOS = "https://www1.tce.pr.gov.br/proxy/remuneracoes/api/mes-ano"
-API_DADOS = "https://www1.tce.pr.gov.br/proxy/remuneracoes/api/remuneracoes"
-OUTPUT_FOLDER = "Dados_PR"
+URL_PAGINA = "https://www.tce.pr.gov.br/transparencia-do-tce-pr/pessoal/remuneracao.htm"
+PASTA_SAIDA = "Dados_PR"
 
-START_YEAR = 2020
-END_YEAR = 2025
+if not os.path.exists(PASTA_SAIDA):
+    os.makedirs(PASTA_SAIDA)
 
-# Mapeamento para definir quem é ATIVO e quem é INATIVO
-# O script usará isso para preencher o campo "situacao"
-CATEGORIAS_MAP = {
-    "ATIVO": [
-        "Membros",
-        "Efetivos",
-        "Cargos Comissionados",
-        "Assessoria Militar"
-    ],
-    "INATIVO": [
-        "Aposentados"
-    ]
-}
-
-# Desativar avisos de segurança (SSL)
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-# Headers para passar pelo Proxy do governo
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Referer": "https://www1.tce.pr.gov.br/",
-    "Host": "www1.tce.pr.gov.br"
-}
-
-# --- Funções Auxiliares ---
-
-def clean_currency(value_str):
-    if not value_str: return 0.0
-    clean = value_str.replace('.', '').replace(',', '.')
-    try:
-        return float(clean)
-    except:
-        return 0.0
-
-def fetch_periods():
-    """Busca a lista de meses disponíveis no site."""
-    print("📡 Buscando períodos disponíveis...")
-    try:
-        response = requests.get(API_PERIODOS, headers=HEADERS, timeout=30, verify=False)
-        response.raise_for_status()
-        raw_list = response.json()
-        
-        grouped_periods = {}
-        
-        for item in raw_list:
-            valor = item.get('valor', '')
-            try:
-                # Ex: "2025.05 Suplementar I" -> ano=2025, mes=05
-                parts = valor.split(' ')[0].split('.') 
-                year = int(parts[0])
-                month = int(parts[1])
-                
-                if year < START_YEAR or year > END_YEAR:
-                    continue
-                
-                key = f"{year}-{month:02d}" # Chave para agrupar (ex: 2025-05)
-                
-                if key not in grouped_periods:
-                    grouped_periods[key] = []
-                grouped_periods[key].append(valor)
-            except:
-                continue
-        return grouped_periods
-    except Exception as e:
-        print(f"❌ Erro ao buscar períodos: {e}")
-        return {}
-
-def fetch_payroll_data(period_string, natureza):
-    """Busca os dados da API. Retorna lista vazia se der erro 400 (categoria vazia)."""
-    params = {
-        "mesAno": period_string,
-        "natureza": natureza,
-        "cargo": "" 
-    }
+def setup_webdriver():
+    """
+    Summary: Configures the Chrome WebDriver for headless execution and memory optimization.
+    """
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument("--disable-software-rasterizer")
+    options.page_load_strategy = 'eager'
     
-    try:
-        response = requests.get(API_DADOS, params=params, headers=HEADERS, timeout=60, verify=False)
-        
-        if response.status_code == 400:
-            # Categoria não existe nesse mês (ex: não teve Estagiário em 2020)
-            return []
+    driver = webdriver.Chrome(options=options)
+    driver.set_page_load_timeout(60)
+    return driver
+
+def trigger_change(driver, element):
+    """
+    Summary: Forces the JavaScript 'change' event to fire, crucial for LumisXP reactive forms.
+    """
+    driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", element)
+
+def get_valid_options(select_element, is_month=False):
+    """
+    Summary: Extracts valid options returning tuples of (value, text) to ensure robust selection.
+    """
+    valid_options = []
+    for opt in select_element.options:
+        val = opt.get_attribute("value")
+        text = opt.text.strip()
+        if val and str(val).strip() != "" and "Selecione" not in text: 
+            if is_month:
+                try:
+                    year = int(val.split(".")[0])
+                    if year >= 2020:
+                        valid_options.append((val, text))
+                except:
+                    pass
+            else:
+                valid_options.append((val, text))
+    return valid_options
+
+def extract_table_data(html_item):
+    """
+    Summary: Extracts key-value financial data from the rendered HTML table.
+    """
+    financial_data = {}
+    rows = html_item.find_elements(By.CSS_SELECTOR, "tr.tp_table--tbody-tr")
+    
+    for row in rows:
+        columns = row.find_elements(By.TAG_NAME, "td")
+        if len(columns) == 2:
+            key = columns[0].get_attribute("textContent").strip()
+            value = columns[1].get_attribute("textContent").strip()
             
-        response.raise_for_status()
-        return response.json()
+            if "R$" in value:
+                try:
+                    clean_value = value.replace("R$", "").replace(".", "").replace(",", ".").replace(" ", "").strip()
+                    financial_data[key] = float(clean_value)
+                except:
+                    financial_data[key] = value
+            else:
+                financial_data[key] = value
+                
+    return financial_data
 
-    except Exception as e:
-        print(f"    ! Erro ao buscar '{natureza}' em '{period_string}': {e}")
-        return []
-
-def process_grid_details(detalhes_grid):
-    """Achata a lista de detalhes em um dicionário simples."""
-    flat_data = {}
-    if not detalhes_grid: return flat_data
+def extract_pages(driver, mes_text, nat_text):
+    """
+    Summary: Iterates through pagination and extracts data after confirming the container has items.
+    """
+    dados = []
+    pagina = 1
     
-    for item in detalhes_grid:
-        key = item.get('titulo', '').strip()
-        val_str = item.get('valor', '').strip()
+    while True:
+        itens = driver.find_elements(By.CSS_SELECTOR, ".tp-dropdown-shadow--item")
+        if not itens:
+            break
+            
+        for item in itens:
+            nome_servidor = item.find_element(By.CSS_SELECTOR, ".tp-dropdown-shadow--item-title").get_attribute("textContent").strip()
+            detalhes = extract_table_data(item)
+            
+            registro = {
+                "periodo_folha": mes_text,
+                "natureza_detalhada": nat_text,
+                "nome": nome_servidor,
+                "financeiro": detalhes
+            }
+            dados.append(registro)
+
+        botoes_prox = driver.find_elements(By.CSS_SELECTOR, "button.tp-pagination__btn-next")
+        if not botoes_prox or "disabled" in botoes_prox[0].get_attribute("outerHTML"):
+            break
+            
+        driver.execute_script("arguments[0].click();", botoes_prox[0])
+        time.sleep(3) # Tempo fixo rapido apenas para a mudanca de pagina renderizar
+        pagina += 1
         
-        # Se parece número e não é matrícula, converte para float
-        if any(char.isdigit() for char in val_str) and "MATRICULA" not in key.upper() and "LOTAÇÃO" not in key.upper():
-             flat_data[key] = clean_currency(val_str)
-        else:
-             flat_data[key] = val_str
-    return flat_data
+    return dados
 
 def main():
-    if not os.path.exists(OUTPUT_FOLDER):
-        os.makedirs(OUTPUT_FOLDER)
-        print(f"Pasta '{OUTPUT_FOLDER}' verificada.")
-    
-    start_time = datetime.now()
-    print(f"--- Iniciando Scraper PR em {start_time.strftime('%H:%M:%S')} ---")
+    """
+    Summary: Main scraper flow with dynamic wait (up to 60 seconds) for slow data rendering.
+    """
+    print(f"Iniciando Scraper PR (Selenium) em {datetime.now().strftime('%H:%M:%S')}")
+    driver = setup_webdriver()
+    wait = WebDriverWait(driver, 15)
 
-    # 1. Pega os meses
-    periods_map = fetch_periods()
-    print(f"📅 Encontrados {len(periods_map)} meses para processar.")
-    
-    sorted_months = sorted(periods_map.keys(), reverse=True)
-
-    # 2. Loop pelos Meses (Agrupados)
-    for year_month in sorted_months:
-        specific_periods = periods_map[year_month]
-        print(f"\n============================================")
-        print(f"  Processando Mês: {year_month}")
-        print(f"    Folhas: {specific_periods}")
-        print(f"============================================")
+    try:
+        print("Acessando portal e aguardando JavaScript...")
+        driver.get(URL_PAGINA)
+        time.sleep(5) 
         
-        month_consolidated_data = []
+        try:
+            wait.until(lambda d: len(Select(d.find_element(By.NAME, "remuneracoes-mes-ano")).options) > 2)
+        except:
+            pass
 
-        # 3. Loop pelas Folhas do mês (Normal, Suplementar...)
-        for period_str in specific_periods:
-            
-            # 4. Loop pelas Categorias (ATIVO / INATIVO)
-            for situacao, lista_naturezas in CATEGORIAS_MAP.items():
-                for nat in lista_naturezas:
+        select_mes_element = Select(driver.find_element(By.NAME, "remuneracoes-mes-ano"))
+        meses_disponiveis = get_valid_options(select_mes_element, is_month=True)
+        print(f"Meses carregados: {len(meses_disponiveis)}")
+        
+        select_nat_element = Select(driver.find_element(By.NAME, "remuneracoes-natureza"))
+        naturezas_disponiveis = get_valid_options(select_nat_element)
+        print(f"Naturezas carregadas: {len(naturezas_disponiveis)}")
+
+        for mes_val, mes_text in meses_disponiveis:
+            print(f"\n=== Processando Mes: {mes_text} ===")
+            dados_consolidados_mes = []
+
+            for nat_val, nat_text in naturezas_disponiveis:
+                print(f" > Buscando: {nat_text} (Aguardando dados...)", end="\r")
+                
+                try:
+                    # Limpa a tabela anterior da tela para nao confundir o robô
+                    driver.execute_script("document.getElementById('remuneracoes-result-container').innerHTML = '';")
                     
-                    # Exibe progresso visual no terminal
-                    print(f"  > Buscando: {nat} ({situacao}) em {period_str}...", end="\r")
+                    select_mes = driver.find_element(By.NAME, "remuneracoes-mes-ano")
+                    Select(select_mes).select_by_value(mes_val)
+                    trigger_change(driver, select_mes)
+                    time.sleep(1)
                     
-                    raw_data = fetch_payroll_data(period_str, nat)
-                    
-                    if not raw_data:
+                    select_nat = driver.find_element(By.NAME, "remuneracoes-natureza")
+                    Select(select_nat).select_by_value(nat_val)
+                    trigger_change(driver, select_nat)
+
+                    # A MAGICA ACONTECE AQUI: Espera ate 60 segundos os dados brotarem na tela
+                    try:
+                        WebDriverWait(driver, 60).until(
+                            lambda d: len(d.find_elements(By.CSS_SELECTOR, ".tp-dropdown-shadow--item")) > 0
+                        )
+                        # Sobrescreve o aviso de "Aguardando"
+                        print(f" > Extraindo: {nat_text}                      ")
+                        novos_dados = extract_pages(driver, mes_text, nat_text)
+                        dados_consolidados_mes.extend(novos_dados)
+                    except Exception:
+                        print(f" > Sem dados para {nat_text} (Timeout 60s)    ")
                         continue
-                    
-                    # Processa os dados
-                    for entry in raw_data:
-                        financial_details = process_grid_details(entry.get('detalhesGrid', []))
                         
-                        clean_obj = {
-                            "situacao": situacao,       
-                            "natureza_detalhada": nat,  
-                            "periodo_folha": period_str,
-                            "matricula": entry.get('matricula'),
-                            "nome": entry.get('nome'),
-                            "lotacao": entry.get('lotacao'),
-                            "cargo": entry.get('cargo'),
-                            "financeiro": financial_details
-                        }
-                        month_consolidated_data.append(clean_obj)
+                except Exception as e:
+                    print(f"   ! Erro na requisicao de {nat_text}: {e}")
+                    continue
+
+            # Salvamento e envio mensal
+            if dados_consolidados_mes:
+                nome_seguro = mes_text.replace(" ", "_").replace(".", "_")
+                nome_arquivo = f"servidores_tce_pr_{nome_seguro}.json"
+                caminho_absoluto = os.path.abspath(os.path.join(PASTA_SAIDA, nome_arquivo))
+                
+                try:
+                    with open(caminho_absoluto, 'w', encoding='utf-8') as f:
+                        json.dump(dados_consolidados_mes, f, ensure_ascii=False, indent=4)
+                    print(f" [OK] Salvo: {nome_arquivo} ({len(dados_consolidados_mes)} registros)")
                     
-                    time.sleep(0.1) # Delay leve
-        
-        print("")
+                    comando_rclone = f'rclone move "{caminho_absoluto}" "meudrive:TCC_Scraping/{PASTA_SAIDA}/"'
+                    subprocess.run(comando_rclone, shell=True, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    print(" [OK] Upload Drive concluido.")
+                    
+                except subprocess.CalledProcessError:
+                    pass # Silencia o erro do rclone no terminal do Windows
+                except Exception as e:
+                    print(f" [ERRO] Salvamento: {e}")
+            else:
+                print(" [!] Sem dados para este mes inteiro.")
 
-        if month_consolidated_data:
-            filename = f"servidores_tce_pr_{year_month.replace('-', '_')}.json"
-            path = os.path.join(OUTPUT_FOLDER, filename)
-            
-            try:
-                with open(path, 'w', encoding='utf-8') as f:
-                    json.dump(month_consolidated_data, f, ensure_ascii=False, indent=4)
-                print(f"✅ SALVO: {filename} ({len(month_consolidated_data)} registros)")
-            except Exception as e:
-                print(f"❌ Erro ao salvar: {e}")
-        else:
-            print(f"⚠️ Sem dados para {year_month}")
-
-    end_time = datetime.now()
-    duration = end_time - start_time
-    print(f"\n🏁 Finalizado em {duration}.")
+    except Exception as e:
+        print(f"Erro critico: {e}")
+    finally:
+        driver.quit()
+        print("Finalizado.")
 
 if __name__ == "__main__":
     main()
