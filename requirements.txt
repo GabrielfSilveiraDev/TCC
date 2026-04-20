@@ -3,3 +3,5 @@ selenium
 beautifulsoup4
 pandas
 plotly
+requests
+urllib3
