@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Projeto TCC
+# Dados normalizados são gerados por normalize_data.py (centenas de MB)
+Dados_Normalizados/
+schema_output.txt
+.idea/
