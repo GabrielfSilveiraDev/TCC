@@ -211,3 +211,5 @@ __marimo__/
 Dados_Normalizados/
 schema_output.txt
 .idea/
+# Logs de descartes e avisos gerados por normalize_data.py e load_data.py
+logs/

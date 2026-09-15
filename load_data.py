@@ -4,22 +4,25 @@ load_data.py — Carrega os JSONs normalizados no SQL Server.
 Uso:
     python load_data.py [--estado ES] [--batch 500]
 
+Chave natural: (estado, matrícula, ano, mês, folha). Registros já presentes no banco não são
+reinseridos; ocorrências (já carregados, estado desconhecido, erro de lote) vão para logs/carga_*.jsonl.
+
 Conexão configurada em settings.py (arquivo .env / variáveis DB_SERVER, DB_NAME,
 DB_USER, DB_PASSWORD; DB_USER vazio usa autenticação do Windows).
 """
 
 import json
 import argparse
-import csv
+from collections import Counter
 from pathlib import Path
 from typing import Optional
 
 import pyodbc
 
+from registro_descartes import RegistroDescartes
 from settings import get_database_settings
 
 NORMALIZED_DIR = Path(__file__).parent / "Dados_Normalizados"
-MG_CSV_PATH    = Path(__file__).parent / "Scrapers" / "Remuneracao_mg.csv"
 
 
 def get_connection() -> pyodbc.Connection:
@@ -55,73 +58,71 @@ def upsert_cargos(cur: pyodbc.Cursor, descricoes: set[str]) -> dict[str, int]:
 
 def get_existing_keys(cur: pyodbc.Cursor, estado_id: int) -> set[tuple]:
     cur.execute(
-        "SELECT matricula, mes, ano FROM dbo.fato_remuneracao WITH (NOLOCK) WHERE estado_id = ? AND matricula IS NOT NULL",
+        "SELECT matricula, ano, mes, folha FROM dbo.fato_remuneracao WITH (NOLOCK) WHERE estado_id = ?",
         estado_id,
     )
-    return {(r[0], r[1], r[2]) for r in cur.fetchall()}
+    return {(r[0], r[1], r[2], r[3]) for r in cur.fetchall()}
 
 
-def load_records(records: list[dict], conn: pyodbc.Connection, estado_id_map: dict, batch_size: int = 5000) -> tuple[int, int]:
+def load_records(records: list[dict], conn: pyodbc.Connection, estado_id_map: dict,
+                 registro: RegistroDescartes, batch_size: int = 5000) -> tuple[int, int]:
+    if not records:
+        return 0, 0
     cur = conn.cursor()
+    sigla = records[0].get("estado", "")
 
     descricoes = {r.get("cargo") for r in records if r.get("cargo")}
     cargo_map = upsert_cargos(cur, descricoes)
 
-    estado_id = None
-    if records:
-        sigla = records[0].get("estado", "")
-        estado_id = estado_id_map.get(sigla)
-
-    existing_keys: set[tuple] = set()
-    if estado_id is not None:
-        existing_keys = get_existing_keys(cur, estado_id)
+    estado_id = estado_id_map.get(sigla)
+    existing_keys = get_existing_keys(cur, estado_id) if estado_id is not None else set()
 
     rows_to_insert = []
-    skipped = 0
+    ocorrencias = Counter()
 
     for rec in records:
-        sigla    = rec.get("estado", "")
-        est_id   = estado_id_map.get(sigla)
+        est_id = estado_id_map.get(rec.get("estado", ""))
         if est_id is None:
-            skipped += 1
+            ocorrencias["estado_desconhecido"] += 1
             continue
+        if not rec.get("matricula"):
+            ocorrencias["sem_matricula"] += 1
+            continue
+
+        chave = (rec["matricula"], rec["ano"], rec["mes"], rec["folha"])
+        if chave in existing_keys:
+            ocorrencias["ja_carregado"] += 1
+            continue
+        existing_keys.add(chave)
 
         cargo_desc = rec.get("cargo")
-        cargo_id   = cargo_map.get(cargo_desc) if cargo_desc else None
-
-        matricula = rec.get("matricula") or None
-        if matricula == "":
-            matricula = None
-
-        mes = rec.get("mes")
-        ano = rec.get("ano")
-
-        if matricula and (matricula, mes, ano) in existing_keys:
-            skipped += 1
-            continue
-
         rows_to_insert.append((
             est_id,
-            cargo_id,
-            matricula,
+            cargo_map.get(cargo_desc) if cargo_desc else None,
+            rec["matricula"],
             rec.get("nome"),
             rec.get("lotacao"),
             rec.get("situacao"),
-            mes,
-            ano,
+            rec["mes"],
+            rec["ano"],
+            rec["folha"],
+            rec["tipo_folha"],
+            rec.get("folha_origem"),
             float(rec.get("salario_base") or 0),
             float(rec.get("beneficios")   or 0),
             float(rec.get("descontos")    or 0),
         ))
 
-        if matricula:
-            existing_keys.add((matricula, mes, ano))
+    # Ocorrências esperadas em recargas são registradas de forma agregada.
+    for motivo, qtd in ocorrencias.items():
+        registro.registrar(sigla, motivo, {"quantidade": qtd})
 
     sql = """
         INSERT INTO dbo.fato_remuneracao
             (estado_id, cargo_id, matricula, nome, lotacao, situacao,
-             mes, ano, salario_base, beneficios, descontos)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+             mes, ano, folha, tipo_folha, folha_origem,
+             salario_base, beneficios, descontos)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """
 
     ok = 0
@@ -136,108 +137,14 @@ def load_records(records: list[dict], conn: pyodbc.Connection, estado_id_map: di
         except pyodbc.Error as exc:
             conn.rollback()
             erros += len(lote)
+            registro.registrar(sigla, "erro_insercao_lote", {"lote": i // batch_size + 1, "registros": len(lote), "erro": str(exc)})
             print(f"  [ERRO lote {i // batch_size + 1}] {exc}")
 
         done = min(i + batch_size, len(rows_to_insert))
         print(f"  Lote {i // batch_size + 1}: {done}/{len(rows_to_insert)} inseridos")
 
-    if skipped:
-        print(f"  Pulados (duplicatas/estado inválido): {skipped:,}")
-
-    return ok, erros
-
-
-def load_mg_csv(csv_path: Path, conn: pyodbc.Connection, estado_id_map: dict, batch_size: int = 5000) -> tuple[int, int]:
-    estado_id = estado_id_map.get("MG")
-    if estado_id is None:
-        print("  [ERRO] Estado MG não encontrado no banco.")
-        return 0, 0
-
-    cur = conn.cursor()
-
-    records = []
-    with open(csv_path, encoding="utf-8", newline="") as f:
-        reader = csv.reader(f, delimiter=";")
-        for row in reader:
-            if len(row) < 9:
-                continue
-            try:
-                records.append({
-                    "matricula":       row[0].strip() or None,
-                    "mes":             int(row[1].strip()),
-                    "cargo":           row[2].strip().title(),
-                    "salario_bruto":   float(row[3].strip()),
-                    "beneficios":      float(row[4].strip()),
-                    "descontos":       float(row[5].strip()),
-                    "salario_liquido": float(row[7].strip()),
-                    "ano":             int(row[8].strip()),
-                })
-            except (ValueError, IndexError):
-                continue
-
-    print(f"  CSV lido: {len(records):,} registros")
-
-    descricoes = {r["cargo"] for r in records if r["cargo"]}
-    cargo_map = upsert_cargos(cur, descricoes)
-
-    existing_keys = get_existing_keys(cur, estado_id)
-
-    rows_to_insert = []
-    skipped = 0
-
-    for rec in records:
-        matricula = rec["matricula"]
-        mes       = rec["mes"]
-        ano       = rec["ano"]
-
-        if matricula and (matricula, mes, ano) in existing_keys:
-            skipped += 1
-            continue
-
-        cargo_id = cargo_map.get(rec["cargo"])
-        sal_base = round(rec["salario_bruto"] - rec["beneficios"], 2)
-
-        rows_to_insert.append((
-            estado_id,
-            cargo_id,
-            matricula,
-            None,
-            None,
-            "Desconhecido",
-            mes,
-            ano,
-            sal_base,
-            rec["beneficios"],
-            rec["descontos"],
-        ))
-
-        if matricula:
-            existing_keys.add((matricula, mes, ano))
-
-    if skipped:
-        print(f"  Pulados (duplicatas): {skipped:,}")
-
-    sql = """
-        INSERT INTO dbo.fato_remuneracao
-            (estado_id, cargo_id, matricula, nome, lotacao, situacao,
-             mes, ano, salario_base, beneficios, descontos)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """
-
-    ok = 0
-    erros = 0
-    for i in range(0, len(rows_to_insert), batch_size):
-        lote = rows_to_insert[i: i + batch_size]
-        try:
-            cur.fast_executemany = True
-            cur.executemany(sql, lote)
-            conn.commit()
-            ok += len(lote)
-        except pyodbc.Error as exc:
-            conn.rollback()
-            erros += len(lote)
-            print(f"  [ERRO lote {i // batch_size + 1}] {exc}")
-        print(f"  Lote {i // batch_size + 1}: {min(i + batch_size, len(rows_to_insert))}/{len(rows_to_insert)} inseridos")
+    if ocorrencias:
+        print(f"  Não inseridos: {dict(ocorrencias)}")
 
     return ok, erros
 
@@ -248,6 +155,7 @@ def run(estado: Optional[str] = None, batch_size: int = 5000) -> None:
     else:
         arquivos = sorted(NORMALIZED_DIR.glob("remuneracoes_??.json"))
 
+    registro = RegistroDescartes("carga")
     conn = get_connection()
     cur  = conn.cursor()
     estado_id_map = get_estado_map(cur)
@@ -255,35 +163,27 @@ def run(estado: Optional[str] = None, batch_size: int = 5000) -> None:
     total_ok = 0
     total_erros = 0
 
-    # Carrega MG via CSV (fonte preferencial)
-    if (estado is None or estado.upper() == "MG") and MG_CSV_PATH.exists():
-        print(f"\nCarregando MG via CSV: {MG_CSV_PATH.name}")
-        ok, erros = load_mg_csv(MG_CSV_PATH, conn, estado_id_map, batch_size)
-        print(f"  Ok: {ok:,}  Erros: {erros:,}")
-        total_ok    += ok
-        total_erros += erros
-
     for arquivo in arquivos:
-        # Pular MG — CSV é a fonte preferencial
-        if arquivo.stem == "remuneracoes_mg" and MG_CSV_PATH.exists():
-            print(f"\n[INFO] Pulando {arquivo.name} — usando CSV direto para MG")
-            continue
-
         if not arquivo.exists():
             print(f"[AVISO] Arquivo não encontrado: {arquivo}")
+            registro.registrar(arquivo.stem[-2:].upper(), "arquivo_normalizado_ausente", {"arquivo": str(arquivo)})
             continue
 
         print(f"\nCarregando: {arquivo.name}")
         with open(arquivo, encoding="utf-8") as f:
             records = json.load(f)
 
-        ok, erros = load_records(records, conn, estado_id_map, batch_size)
+        ok, erros = load_records(records, conn, estado_id_map, registro, batch_size)
         print(f"  Ok: {ok:,}  Erros: {erros:,}")
         total_ok    += ok
         total_erros += erros
 
     conn.close()
     print(f"\nConcluído. Total inserido: {total_ok:,}  Erros: {total_erros:,}")
+    registro.imprimir_resumo()
+    caminho_log = registro.salvar()
+    if caminho_log:
+        print(f"Log da carga: {caminho_log}")
 
 
 if __name__ == "__main__":
@@ -292,4 +192,3 @@ if __name__ == "__main__":
     parser.add_argument("--batch",  type=int, default=5000, help="Tamanho do lote (default 5000)")
     args = parser.parse_args()
     run(estado=args.estado, batch_size=args.batch)
-

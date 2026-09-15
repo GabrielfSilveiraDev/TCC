@@ -78,15 +78,22 @@ GO
 --                    faltas, outros descontos obrigatórios/voluntários)
 --
 -- Colunas calculadas (PERSISTED para performance):
---   rendimento_bruto = salario_base + beneficios          (total bruto do mês)
+--   rendimento_bruto = salario_base + beneficios          (total bruto da folha)
 --   salario_liquido  = rendimento_bruto - descontos       (valor efetivamente recebido)
+--
+-- Grão: uma linha por servidor × competência × folha. Tribunais que publicam folhas separadas
+-- no mesmo mês (PR: ordinária, suplementares, parcelas do 13º; SC: folhas 1/5/7/90; MG: tipo 1/2)
+-- geram uma linha por folha; os que consolidam o mês usam folha = 'UNICA'.
+--   folha        = identificador normalizado da folha dentro do tribunal (compõe a chave)
+--   tipo_folha   = categoria analítica comum aos tribunais
+--   folha_origem = rótulo original publicado pela fonte
 -- ============================================================================
 CREATE TABLE dbo.fato_remuneracao (
     -- Identificadores
     id              BIGINT          NOT NULL IDENTITY(1,1),
     estado_id       TINYINT         NOT NULL,
     cargo_id        INT             NULL,
-    matricula       VARCHAR(30)     NULL,
+    matricula       VARCHAR(30)     NOT NULL,
     nome            NVARCHAR(200)   NULL,
     lotacao         NVARCHAR(200)   NULL,
     situacao        VARCHAR(50)     NULL,
@@ -94,6 +101,11 @@ CREATE TABLE dbo.fato_remuneracao (
     -- Período de referência
     mes             TINYINT         NOT NULL,
     ano             SMALLINT        NOT NULL,
+
+    -- Folha de pagamento
+    folha           VARCHAR(80)     NOT NULL CONSTRAINT DF_fato_folha      DEFAULT 'UNICA',
+    tipo_folha      VARCHAR(30)     NOT NULL CONSTRAINT DF_fato_tipo_folha DEFAULT 'UNICA',
+    folha_origem    NVARCHAR(200)   NULL,
 
     -- Valores monetários (R$, 2 casas decimais)
     salario_base    DECIMAL(14,2)   NOT NULL CONSTRAINT DF_fato_salario_base DEFAULT 0,
@@ -113,7 +125,10 @@ CREATE TABLE dbo.fato_remuneracao (
     CONSTRAINT FK_fato_cargo       FOREIGN KEY (cargo_id)  REFERENCES dbo.dim_cargo  (cargo_id),
     CONSTRAINT CHK_fato_mes        CHECK (mes  BETWEEN 1 AND 12),
     CONSTRAINT CHK_fato_ano        CHECK (ano  BETWEEN 2000 AND 2100),
-    CONSTRAINT CHK_fato_descontos  CHECK (descontos >= 0)
+    CONSTRAINT CHK_fato_descontos  CHECK (descontos >= 0),
+    CONSTRAINT CHK_fato_tipo_folha CHECK (tipo_folha IN (
+        'UNICA', 'NORMAL', 'NORMAL_COM_SUPLEMENTAR', 'SUPLEMENTAR', 'DECIMO_TERCEIRO',
+        'COMPLEMENTAR', 'ESTAGIARIOS', 'PENSIONISTAS', 'OUTRA'))
 );
 GO
 
@@ -121,10 +136,10 @@ GO
 -- 4. Índices para queries do dashboard
 -- ============================================================================
 
--- Unicidade natural: uma linha por servidor (matrícula) por estado + período
+-- Unicidade natural: uma linha por servidor × competência × folha.
+-- Sem filtro: a matrícula é obrigatória, então recargas não duplicam registros.
 CREATE UNIQUE NONCLUSTERED INDEX UQ_fato_natural
-    ON dbo.fato_remuneracao (estado_id, matricula, mes, ano)
-    WHERE matricula IS NOT NULL;
+    ON dbo.fato_remuneracao (estado_id, matricula, ano, mes, folha);
 GO
 
 -- Listagem principal e overview histórico (filtro estado + período)
@@ -139,10 +154,10 @@ CREATE NONCLUSTERED INDEX IX_fato_cargo_periodo
     INCLUDE (estado_id, salario_base, beneficios, descontos);
 GO
 
--- Histórico individual por matrícula
+-- Histórico individual por matrícula (e agregação mensal por servidor)
 CREATE NONCLUSTERED INDEX IX_fato_matricula
-    ON dbo.fato_remuneracao (estado_id, matricula)
-    WHERE matricula IS NOT NULL;
+    ON dbo.fato_remuneracao (estado_id, matricula, ano, mes)
+    INCLUDE (salario_base, beneficios, descontos);
 GO
 
 -- Busca e filtro por nome
@@ -158,8 +173,10 @@ CREATE NONCLUSTERED INDEX IX_fato_rendimento
 GO
 
 -- ============================================================================
--- 5. View principal — usada por todos os endpoints da API
+-- 5. Views
 -- ============================================================================
+
+-- Uma linha por folha (grão da tabela de fato), para análises que distinguem folhas.
 CREATE OR ALTER VIEW dbo.vw_remuneracao_completa AS
 SELECT
     f.id,
@@ -172,6 +189,9 @@ SELECT
     f.mes,
     f.ano,
     RIGHT('0' + CAST(f.mes AS VARCHAR(2)), 2) + '/' + CAST(f.ano AS VARCHAR(4)) AS mes_ano,
+    f.folha,
+    f.tipo_folha,
+    f.folha_origem,
     f.salario_base,
     f.beneficios,
     f.descontos,
@@ -181,6 +201,33 @@ SELECT
 FROM      dbo.fato_remuneracao f
 JOIN      dbo.dim_estado       e ON e.estado_id = f.estado_id
 LEFT JOIN dbo.dim_cargo        c ON c.cargo_id  = f.cargo_id;
+GO
+
+-- Uma linha por servidor × competência, somando todas as folhas do mês — usada pela API do painel.
+-- id = menor id entre as folhas somadas (referência estável para o detalhe do servidor).
+CREATE OR ALTER VIEW dbo.vw_remuneracao_mensal AS
+SELECT
+    MIN(f.id)                                                                     AS id,
+    e.sigla                                                                       AS estado,
+    f.matricula,
+    MAX(f.nome)                                                                   AS nome,
+    MAX(c.descricao)                                                              AS cargo,
+    MAX(f.lotacao)                                                                AS lotacao,
+    MAX(f.situacao)                                                               AS situacao,
+    f.mes,
+    f.ano,
+    RIGHT('0' + CAST(f.mes AS VARCHAR(2)), 2) + '/' + CAST(f.ano AS VARCHAR(4)) AS mes_ano,
+    COUNT(*)                                                                      AS quantidade_folhas,
+    SUM(f.salario_base)                                                           AS salario_base,
+    SUM(f.beneficios)                                                             AS beneficios,
+    SUM(f.descontos)                                                              AS descontos,
+    SUM(f.rendimento_bruto)                                                       AS rendimento_bruto,
+    SUM(f.salario_liquido)                                                        AS salario_liquido,
+    MAX(f.data_carga)                                                             AS data_carga
+FROM      dbo.fato_remuneracao f
+JOIN      dbo.dim_estado       e ON e.estado_id = f.estado_id
+LEFT JOIN dbo.dim_cargo        c ON c.cargo_id  = f.cargo_id
+GROUP BY e.sigla, f.matricula, f.ano, f.mes;
 GO
 
 

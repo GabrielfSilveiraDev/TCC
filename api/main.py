@@ -144,7 +144,7 @@ def listar_servidores(
                mes, ano, mes_ano,
                salario_base, beneficios, descontos,
                rendimento_bruto, salario_liquido
-        FROM dbo.vw_remuneracao_completa
+        FROM dbo.vw_remuneracao_mensal
         {where}
         {order_clause}
         OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
@@ -153,7 +153,7 @@ def listar_servidores(
     )
     rows = _rows_to_list(cur)
 
-    cur.execute(f"SELECT COUNT(*) FROM dbo.vw_remuneracao_completa {where}", *params)
+    cur.execute(f"SELECT COUNT(*) FROM dbo.vw_remuneracao_mensal {where}", *params)
     total = cur.fetchone()[0]
 
     return {
@@ -169,16 +169,30 @@ def listar_servidores(
 def detalhe_servidor(servidor_id: str):
     conn = get_conn()
     cur  = conn.cursor()
+    # Localiza a competência pela folha (id) e só então consulta a visão mensal pela chave,
+    # evitando agregar toda a base para filtrar um único id.
     cur.execute(
         """
-        SELECT id, estado, matricula, nome, cargo, lotacao, situacao,
-               mes, ano, mes_ano,
-               salario_base, beneficios, descontos,
-               rendimento_bruto, salario_liquido
-        FROM dbo.vw_remuneracao_completa
-        WHERE id = ?
+        SELECT f.estado_id, f.matricula, f.ano, f.mes
+        FROM dbo.fato_remuneracao f
+        WHERE f.id = ?
         """,
         int(servidor_id),
+    )
+    chave = cur.fetchone()
+    if not chave:
+        raise HTTPException(status_code=404, detail="Servidor não encontrado")
+    cur.execute(
+        """
+        SELECT m.id, m.estado, m.matricula, m.nome, m.cargo, m.lotacao, m.situacao,
+               m.mes, m.ano, m.mes_ano,
+               m.salario_base, m.beneficios, m.descontos,
+               m.rendimento_bruto, m.salario_liquido
+        FROM dbo.vw_remuneracao_mensal m
+        JOIN dbo.dim_estado e ON e.sigla = m.estado
+        WHERE e.estado_id = ? AND m.matricula = ? AND m.ano = ? AND m.mes = ?
+        """,
+        chave[0], chave[1], chave[2], chave[3],
     )
     row = cur.fetchone()
     if not row:
@@ -200,7 +214,7 @@ def resumo_todos_estados():
             AVG(salario_liquido)     AS media_liquida,
             AVG(descontos)           AS media_descontos,
             AVG(beneficios)          AS media_beneficios
-        FROM dbo.vw_remuneracao_completa
+        FROM dbo.vw_remuneracao_mensal
         GROUP BY estado
         ORDER BY estado ASC
         """
@@ -225,7 +239,7 @@ def resumo_estado(sigla: str):
             AVG(salario_liquido)     AS media_liquida,
             AVG(descontos)           AS media_descontos,
             AVG(beneficios)          AS media_beneficios
-        FROM dbo.vw_remuneracao_completa
+        FROM dbo.vw_remuneracao_mensal
         WHERE estado = ?
         GROUP BY estado
         """,
@@ -265,7 +279,7 @@ def overview_kpis(
             AVG(rendimento_bruto)        AS media_nacional_bruta,
             AVG(salario_liquido)         AS media_nacional_liquida,
             SUM(rendimento_bruto)        AS total_folha
-        FROM dbo.vw_remuneracao_completa
+        FROM dbo.vw_remuneracao_mensal
         {periodo_filter}
         """,
         *params_kpi,
@@ -279,7 +293,7 @@ def overview_kpis(
         cur.execute(
             """
             SELECT AVG(rendimento_bruto) AS media_anterior
-            FROM dbo.vw_remuneracao_completa
+            FROM dbo.vw_remuneracao_mensal
             WHERE ano = ? AND mes = ?
             """,
             *params_anterior,
@@ -319,7 +333,7 @@ def overview_historico(
             AVG(rendimento_bruto)  AS media_bruta,
             AVG(salario_liquido)   AS media_liquida,
             AVG(descontos)         AS media_descontos
-        FROM dbo.vw_remuneracao_completa
+        FROM dbo.vw_remuneracao_mensal
         WHERE (ano * 100 + mes) >= ?
         {fim_filter}
         GROUP BY ano, mes
@@ -350,7 +364,7 @@ def historico_servidor(estado: str, matricula: str):
     cur.execute(
         """
         SELECT mes, ano, salario_base, rendimento_bruto, descontos, beneficios, salario_liquido
-        FROM dbo.vw_remuneracao_completa
+        FROM dbo.vw_remuneracao_mensal
         WHERE estado = ? AND matricula = ?
         ORDER BY ano ASC, mes ASC
         """,
@@ -395,7 +409,7 @@ def resumo_cargos():
             AVG(salario_liquido)    AS media_liquida,
             AVG(descontos)          AS media_descontos,
             AVG(beneficios)         AS media_beneficios
-        FROM dbo.vw_remuneracao_completa
+        FROM dbo.vw_remuneracao_mensal
         WHERE cargo IS NOT NULL
         GROUP BY cargo
         ORDER BY AVG(rendimento_bruto) DESC
@@ -418,7 +432,7 @@ def resumo_cargo_especifico(cargo: str = Path(...)):
             AVG(salario_liquido)    AS media_liquida,
             AVG(descontos)          AS media_descontos,
             AVG(beneficios)         AS media_beneficios
-        FROM dbo.vw_remuneracao_completa
+        FROM dbo.vw_remuneracao_mensal
         WHERE cargo = ?
         GROUP BY cargo
         """,
@@ -445,7 +459,7 @@ def resumo_cargo_por_estados(cargo: str = Path(...)):
             AVG(salario_liquido)    AS media_liquida,
             AVG(descontos)          AS media_descontos,
             AVG(beneficios)         AS media_beneficios
-        FROM dbo.vw_remuneracao_completa
+        FROM dbo.vw_remuneracao_mensal
         WHERE cargo = ?
         GROUP BY estado
         ORDER BY AVG(rendimento_bruto) DESC
@@ -475,7 +489,7 @@ def resumo_cargos_estado(sigla: str):
             AVG(salario_liquido)    AS media_liquida,
             AVG(descontos)          AS media_descontos,
             AVG(beneficios)         AS media_beneficios
-        FROM dbo.vw_remuneracao_completa
+        FROM dbo.vw_remuneracao_mensal
         WHERE estado = ? AND cargo IS NOT NULL
         GROUP BY cargo
         ORDER BY AVG(rendimento_bruto) DESC
@@ -538,7 +552,7 @@ def ranking(
         SELECT TOP (?) nome, cargo, estado, mes_ano,
                salario_base, beneficios, descontos,
                rendimento_bruto, salario_liquido
-        FROM dbo.vw_remuneracao_completa
+        FROM dbo.vw_remuneracao_mensal
         {where}
         ORDER BY rendimento_bruto DESC
         """,
@@ -575,7 +589,7 @@ def evolucao(
             AVG(descontos)       AS media_descontos,
             AVG(rendimento_bruto)   AS media_bruto,
             AVG(salario_liquido) AS media_liquido
-        FROM dbo.vw_remuneracao_completa
+        FROM dbo.vw_remuneracao_mensal
         WHERE estado = ? AND ano BETWEEN ? AND ?
         {cargo_filter}
         GROUP BY ano, mes, mes_ano
@@ -609,7 +623,7 @@ def comparacao_cargos(
             AVG(rendimento_bruto)   AS media_bruto,
             AVG(salario_liquido) AS media_liquido,
             MAX(rendimento_bruto)   AS max_bruto
-        FROM dbo.vw_remuneracao_completa
+        FROM dbo.vw_remuneracao_mensal
         WHERE ano = ? AND mes = ? AND cargo IS NOT NULL
         {estado_filter}
         GROUP BY cargo

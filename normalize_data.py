@@ -1,9 +1,16 @@
 """
-normalize_data.py — Normalização dos JSONs de cada estado para o schema canônico.
+normalize_data.py — Normalização dos dados brutos de cada estado para o schema canônico.
+
+Grão: uma linha por servidor × competência × folha. Tribunais que publicam uma única folha
+consolidada por mês recebem folha = 'UNICA'.
 
 Saída por registro:
     estado, matricula, nome, cargo, lotacao, situacao, mes, ano,
+    folha, tipo_folha, folha_origem,
     salario_base, beneficios, descontos, salario_bruto, salario_liquido
+
+Descartes e avisos (sem matrícula, competência inválida, fora do recorte, duplicatas,
+conflitos de chave, divergências aritméticas) são gravados em logs/normalizacao_*.jsonl.
 
 Uso:
     python normalize_data.py
@@ -14,13 +21,26 @@ Gera:
 
 import os
 import re
+import csv
 import json
 import glob
+from collections import Counter
 from pathlib import Path
+
+from registro_descartes import RegistroDescartes
 
 BASE_DIR   = Path(__file__).parent / "Scrapers"
 OUTPUT_DIR = Path(__file__).parent / "Dados_Normalizados"
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+# Recorte temporal do trabalho: exercícios a partir de 2020 (TCC 1, Seção 4.1).
+ANO_INICIAL = 2020
+# Diferença aceita entre soma de componentes e totais publicados (arredondamento da fonte).
+TOLERANCIA = 1.00
+
+CAMPOS_VALOR = ("salario_base", "beneficios", "descontos")
+
+FOLHA_UNICA = {"folha": "UNICA", "tipo_folha": "UNICA", "folha_origem": None}
 
 
 def _parse_brl(value) -> float:
@@ -52,15 +72,6 @@ def _normalize_situacao(raw: str) -> str:
     return raw.strip().title()
 
 
-def _mes_por_nome(nome: str) -> int:
-    meses = {
-        "janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3,
-        "abril": 4, "maio": 5, "junho": 6, "julho": 7, "agosto": 8,
-        "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12,
-    }
-    return meses.get(nome.strip().lower(), 0)
-
-
 def _mes_ano_to_int(mes_ano: str):
     """'01/2024' → (1, 2024). Retorna (0, 0) se inválido."""
     try:
@@ -82,7 +93,7 @@ def _classify_credito(descricao: str) -> str:
     return "beneficios"
 
 
-def _parse_es(records: list) -> list:
+def _parse_es(records: list, registro: RegistroDescartes) -> list:
     out = []
     for r in records:
         financeiro = r.get("financeiro", {})
@@ -109,6 +120,7 @@ def _parse_es(records: list) -> list:
             "lotacao": (r.get("lotacao") or "").strip(),
             "situacao": _normalize_situacao(r.get("situacao", "")),
             "mes": mes, "ano": ano,
+            **FOLHA_UNICA,
             "salario_base": round(sal_base, 2),
             "beneficios": round(beneficios, 2),
             "descontos": round(total_desc, 2),
@@ -118,7 +130,7 @@ def _parse_es(records: list) -> list:
     return out
 
 
-def _parse_sp(records: list) -> list:
+def _parse_sp(records: list, registro: RegistroDescartes) -> list:
     out = []
     for r in records:
         proventos  = r.get("proventos", [])
@@ -146,6 +158,7 @@ def _parse_sp(records: list) -> list:
             "lotacao": (r.get("lotacao") or "").strip(),
             "situacao": _normalize_situacao(r.get("tipo", "")),
             "mes": mes, "ano": ano,
+            **FOLHA_UNICA,
             "salario_base": round(sal_base, 2),
             "beneficios": beneficios,
             "descontos": round(total_desc, 2),
@@ -155,38 +168,52 @@ def _parse_sp(records: list) -> list:
     return out
 
 
-def _parse_mg(records: list) -> list:
-    out = []
-    for r in records:
-        mes_nome = r.get("MÊS REFERÊNCIA", r.get("MŠS REFERŠNCIA", ""))
-        mes = _mes_por_nome(mes_nome)
+# MG: CSV sem cabeçalho. Colunas confirmadas pela aritmética (bruto − descontos = líquido em 99,75%
+# das linhas): 0 matrícula, 2 cargo, 3 bruto, 6 descontos totais, 7 líquido, 8 ano, 9 mês.
+# HIPÓTESES não confirmadas pela fonte: coluna 1 = tipo de folha (1 normal, 2 complementar; o valor 2
+# concentra-se em dez/jul/nov/jan) e coluna 4 = benefícios. A coluna 5 (parcela dos descontos) é ignorada.
+_TIPOS_FOLHA_MG = {"1": "NORMAL", "2": "COMPLEMENTAR"}
 
-        cargo = (
-            r.get("NOME DO CARGO / FUNÇÃO PÚBLICA / EMPREGO PÚBLICO")
-            or r.get("NOME DO CARGO / FUN\u00c7\u00c3O P\u00dablica / EMPREGO P\u00daBlico")
-            or r.get("NOME DO CARGO / FUN‡ƒO PšBLICA / EMPREGO PšBLICO", "")
-        )
-        situacao = (
-            r.get("SITUAÇÃO DO SERVIDOR")
-            or r.get("SITUA\u00c7\u00c3O DO SERVIDOR")
-            or r.get("SITUA‡ƒO DO SERVIDOR", "")
-        )
+def _parse_mg(records: list, registro: RegistroDescartes) -> list:
+    out = []
+    for row in records:
+        try:
+            tipo       = row[1].strip()
+            bruto      = float(row[3])
+            beneficios = float(row[4])
+            total_desc = float(row[6])
+            liquido    = float(row[7])
+            ano, mes   = int(row[8]), int(row[9])
+        except (ValueError, IndexError) as erro:
+            registro.registrar("MG", "linha_csv_invalida", {"linha": row, "erro": str(erro)})
+            continue
+
+        if abs(bruto - total_desc - liquido) > TOLERANCIA:
+            registro.aviso("MG", "liquido_diverge_de_bruto_menos_descontos",
+                           {"matricula": row[0], "ano": ano, "mes": mes, "bruto": bruto,
+                            "descontos": total_desc, "liquido_publicado": liquido})
 
         out.append({
             "estado": "MG",
-            "matricula": None,
+            "matricula": row[0].strip(),
             "nome": None,
-            "cargo": (cargo or "").strip().title(),
+            "cargo": row[2].strip().title(),
             "lotacao": None,
-            "situacao": _normalize_situacao(situacao),
-            "mes": mes, "ano": 0,
-            "salario_base": 0.0, "beneficios": 0.0, "descontos": 0.0,
-            "salario_bruto": 0.0, "salario_liquido": 0.0,
+            "situacao": "Desconhecido",
+            "mes": mes, "ano": ano,
+            "folha": f"TIPO {tipo}",
+            "tipo_folha": _TIPOS_FOLHA_MG.get(tipo, "OUTRA"),
+            "folha_origem": f"coluna 1 do CSV = {tipo}",
+            "salario_base": round(bruto - beneficios, 2),
+            "beneficios": round(beneficios, 2),
+            "descontos": round(total_desc, 2),
+            "salario_bruto": round(bruto, 2),
+            "salario_liquido": round(bruto - total_desc, 2),
         })
     return out
 
 
-def _parse_rs(records: list) -> list:
+def _parse_rs(records: list, registro: RegistroDescartes) -> list:
     out = []
     for r in records:
         sal_base   = _parse_brl(r.get("remuneracao_bruta", 0))
@@ -203,12 +230,13 @@ def _parse_rs(records: list) -> list:
 
         out.append({
             "estado": "RS",
-            "matricula": None,
+            "matricula": str(r.get("matricula") or ""),
             "nome": (r.get("nome") or r.get("nome_servidor") or "").strip().title(),
             "cargo": (r.get("cargo") or "").strip().title(),
             "lotacao": (r.get("funcao_gratificada") or "").strip(),
             "situacao": "Desconhecido",
             "mes": mes, "ano": ano,
+            **FOLHA_UNICA,
             "salario_base": round(sal_base, 2),
             "beneficios": round(beneficios, 2),
             "descontos": round(total_desc, 2),
@@ -218,81 +246,110 @@ def _parse_rs(records: list) -> list:
     return out
 
 
-def _parse_pr(records: list) -> list:
+# PR: o rótulo do período identifica a folha ('2025.12', '2025.12 Suplementar I', '2021.04 1ª parcela 13º',
+# '2020.01 + Suplementar I', '2020.13 2ª parcela 13º'). A competência 13 é o 13º pago em dezembro.
+_RE_PERIODO_PR = re.compile(r"^(\d{4})\.(\d{2})\s*(.*)$")
+
+def _folha_pr(periodo: str):
+    m = _RE_PERIODO_PR.match(periodo.strip())
+    if not m:
+        return None
+    ano, mes_rotulo = int(m.group(1)), int(m.group(2))
+    resto = re.sub(r"\s+", " ", m.group(3).replace("°", "º")).strip().upper()
+    resto = re.sub(r"^\+\s*", "+ ", resto)
+
+    if "13" in resto or mes_rotulo == 13:
+        parcela = re.search(r"([12])\s*ª?\s*PARCELA", resto)
+        folha, tipo = (f"13º {parcela.group(1)}ª PARCELA" if parcela else "13º"), "DECIMO_TERCEIRO"
+    elif resto.startswith("+"):
+        folha, tipo = f"ORDINARIA {resto}", "NORMAL_COM_SUPLEMENTAR"
+    elif "SUPLEMENTAR" in resto:
+        folha, tipo = resto, "SUPLEMENTAR"
+    elif not resto:
+        folha, tipo = "ORDINARIA", "NORMAL"
+    else:
+        folha, tipo = resto, "OUTRA"
+
+    if mes_rotulo == 13:
+        folha += " [COMPETENCIA 13]"
+    mes = 12 if mes_rotulo == 13 else mes_rotulo
+    return ano, mes, {"folha": folha, "tipo_folha": tipo, "folha_origem": periodo}
+
+
+def _parse_pr(records: list, registro: RegistroDescartes) -> list:
     out = []
     for r in records:
-        fin = r.get("financeiro", {})
+        competencia = _folha_pr(r.get("periodo_folha", ""))
+        if competencia is None:
+            registro.registrar("PR", "competencia_invalida", {"periodo_folha": r.get("periodo_folha")})
+            continue
+        ano, mes, folha = competencia
+        # O TCE-PR publica cada folha por natureza funcional; a mesma matrícula pode receber em duas
+        # naturezas na mesma folha (ex.: 2022.11), então a natureza compõe o identificador da folha.
+        folha = {**folha, "folha": f"{folha['folha']} | {r.get('natureza') or 'SEM NATUREZA'}"}
 
-        def _sum(fin_dict, *partials) -> float:
-            """Soma TODOS os valores cujas chaves contenham qualquer dos partials."""
-            total = 0.0
-            for key, val in fin_dict.items():
-                for p in partials:
-                    if p.lower() in key.lower():
-                        total += _parse_brl(val)
-                        break
-            return total
+        if r.get("valores_ausentes"):
+            registro.aviso("PR", "valor_ausente_na_fonte",
+                           {"matricula": r.get("matricula"), "periodo_folha": r["periodo_folha"],
+                            "campos": r["valores_ausentes"]})
+        # Campos sem valor na fonte (None) entram como zero; o aviso acima preserva o rastro.
+        fin = {k: (v or 0.0) for k, v in r.get("financeiro", {}).items()}
+        chave_bruto = next((k for k in fin if "total bruto" in k.lower()), None)
+        if chave_bruto is None:
+            registro.registrar("PR", "sem_total_bruto", {"matricula": r.get("matricula"), "periodo_folha": r["periodo_folha"]})
+            continue
 
-        # Usar Total Bruto pré-calculado como fonte de verdade
-        bruto    = _sum(fin, "total bruto")
+        # Total Bruto publicado é a fonte de verdade; confere-se a soma das rubricas que o antecedem no
+        # grid (pela ordem, pois há rubricas publicadas sem o índice [n]).
+        bruto = fin[chave_bruto]
+        rubricas = list(fin)
+        componentes = sum(fin[k] for k in rubricas[:rubricas.index(chave_bruto)])
+        if abs(componentes - bruto) > TOLERANCIA:
+            registro.aviso("PR", "componentes_divergem_do_total_bruto",
+                           {"matricula": r.get("matricula"), "periodo_folha": r["periodo_folha"],
+                            "total_bruto": bruto, "soma_componentes": round(componentes, 2)})
+        if r.get("valores_originais_em_data"):
+            registro.aviso("PR", "valor_publicado_como_data",
+                           {"matricula": r.get("matricula"), "periodo_folha": r["periodo_folha"],
+                            "campos": r["valores_originais_em_data"]})
+        if r.get("valores_originais_em_traco"):
+            registro.aviso("PR", "valor_publicado_como_traco",
+                           {"matricula": r.get("matricula"), "periodo_folha": r["periodo_folha"],
+                            "campos": r["valores_originais_em_traco"]})
 
-        # Salário base = componentes fixos/permanentes
-        sal_base = _sum(fin, "vantagens fixas", "vantagens pessoais", "cargo em comiss")
-
-        # Benefícios = tudo que não é sal_base nem desconto
-        beneficios = round(bruto - sal_base, 2)
-
-        # Descontos (ambos negativos no JSON, usar abs)
-        total_desc = (
-            abs(_sum(fin, "descontos obrig"))
-            + abs(_sum(fin, "redutor constitucional"))
-        )
-        liquido = round(bruto - total_desc, 2)
-
-        periodo = r.get("periodo_folha", "")
-        try:
-            ano_str, mes_str = periodo.split(".")[0], periodo.split(".")[1][:2]
-            ano = int(ano_str)
-            mes = int(mes_str)
-        except Exception:
-            mes, ano = 0, 0
-
-        matricula = str(fin.get("MATRICULA") or fin.get("MATR\u00cdCULA") or "").strip()
-        cargo = str(
-            fin.get("CARGO")
-            or fin.get("Cargo em Comiss\u00e3o / Fun\u00e7\u00e3o")
-            or fin.get("Cargo em Comisso / Funo", "")
-        ).strip().title()
-        if cargo.lower() == "null":
-            cargo = str(
-                fin.get("Cargo em Comissão / Função")
-                or fin.get("Cargo em Comisso / Funo", "")
-            ).strip().title()
-        lotacao = str(
-            fin.get("LOTAÇÃO") or fin.get("LOTA\u00c7\u00c3O") or fin.get("LOTA‡ƒO", "")
-        ).strip()
+        sal_base = sum(v for k, v in fin.items()
+                       if any(p in k.lower() for p in ("vantagens fixas", "vantagens pessoais", "cargo em comiss")))
+        total_desc = sum(abs(v) for k, v in fin.items()
+                         if "descontos obrig" in k.lower() or "redutor constitucional" in k.lower())
 
         out.append({
             "estado": "PR",
-            "matricula": matricula,
+            "matricula": str(r.get("matricula") or "").strip(),
             "nome": (r.get("nome") or "").strip().title(),
-            "cargo": cargo,
-            "lotacao": lotacao,
-            "situacao": _normalize_situacao(r.get("natureza_detalhada", "")),
+            "cargo": (r.get("cargo") or r.get("cargo_comissionado") or "").strip().title(),
+            "lotacao": (r.get("lotacao") or "").strip(),
+            "situacao": _normalize_situacao(r.get("natureza_descricao", "")),
             "mes": mes, "ano": ano,
+            **folha,
             "salario_base": round(sal_base, 2),
-            "beneficios": beneficios,
+            "beneficios": round(bruto - sal_base, 2),
             "descontos": round(total_desc, 2),
             "salario_bruto": round(bruto, 2),
-            "salario_liquido": liquido,
+            "salario_liquido": round(bruto - total_desc, 2),
         })
     return out
 
 
-def _parse_sc(records: list) -> list:
+# SC: ID_Servidor_Completo = 'matricula##mes##ano##nº da folha'.
+_TIPOS_FOLHA_SC = {"1": "NORMAL", "5": "DECIMO_TERCEIRO", "7": "ESTAGIARIOS", "90": "PENSIONISTAS"}
+
+def _parse_sc(records: list, registro: RegistroDescartes) -> list:
     out = []
     for r in records:
-        detalhes  = r.get("Detalhes_Remuneracao", {})
+        detalhes = r.get("Detalhes_Remuneracao")
+        if not detalhes:
+            registro.registrar("SC", "sem_detalhes_de_remuneracao", {"id": r.get("ID_Servidor_Completo")})
+            continue
         proventos = detalhes.get("proventos", [])
         descontos = detalhes.get("descontos", [])
 
@@ -305,19 +362,12 @@ def _parse_sc(records: list) -> list:
         bruto   = sal_base + beneficios
         liquido = bruto - total_desc
 
-        tipo_folha = r.get("Tipo_Folha", "")
-        match = re.search(r"(\d{2})/(\d{4})", tipo_folha)
-        if match:
-            mes, ano = int(match.group(1)), int(match.group(2))
-        else:
-            parts = r.get("ID_Servidor_Completo", "").split("##")
-            try:
-                mes, ano = int(parts[1]), int(parts[2])
-            except Exception:
-                mes, ano = 0, 0
-
-        matricula_parts = r.get("ID_Servidor_Completo", "").split("##")
-        matricula = matricula_parts[0] if matricula_parts else None
+        partes = (r.get("ID_Servidor_Completo") or "").split("##")
+        try:
+            matricula, mes, ano, numero_folha = partes[0], int(partes[1]), int(partes[2]), partes[3]
+        except (IndexError, ValueError):
+            registro.registrar("SC", "identificador_invalido", {"id": r.get("ID_Servidor_Completo")})
+            continue
 
         out.append({
             "estado": "SC",
@@ -327,6 +377,9 @@ def _parse_sc(records: list) -> list:
             "lotacao": None,
             "situacao": _normalize_situacao(r.get("situacao", "")),
             "mes": mes, "ano": ano,
+            "folha": f"FOLHA {numero_folha}",
+            "tipo_folha": _TIPOS_FOLHA_SC.get(numero_folha, "OUTRA"),
+            "folha_origem": r.get("Tipo_Folha"),
             "salario_base": round(sal_base, 2),
             "beneficios": round(beneficios, 2),
             "descontos": round(total_desc, 2),
@@ -336,7 +389,7 @@ def _parse_sc(records: list) -> list:
     return out
 
 
-def _parse_rj(records: list) -> list:
+def _parse_rj(records: list, registro: RegistroDescartes) -> list:
     out = []
     for r in records:
         remuneracao = r.get("remuneracao", {})
@@ -376,6 +429,7 @@ def _parse_rj(records: list) -> list:
             "situacao":        "Desconhecido",
             "mes":             mes,
             "ano":             ano,
+            **FOLHA_UNICA,
             "salario_base":    round(sal_base, 2),
             "beneficios":      beneficios,
             "descontos":       round(total_desc, 2),
@@ -385,57 +439,98 @@ def _parse_rj(records: list) -> list:
     return out
 
 
+def _ler_jsons(pasta: Path, pattern: str):
+    """Gera (nome do arquivo, lista de registros) para cada JSON bruto da pasta."""
+    for filepath in sorted(glob.glob(str(pasta / pattern))):
+        with open(filepath, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+        yield os.path.basename(filepath), (raw if isinstance(raw, list) else [raw])
+
+
+def _ler_csv_mg(pasta: Path, pattern: str):
+    caminho = pasta / pattern
+    with open(caminho, encoding="utf-8", newline="") as f:
+        yield caminho.name, list(csv.reader(f, delimiter=";"))
+
+
 ESTADO_CONFIG = {
-    "ES": {"pasta": "Dados_ES", "parser": _parse_es, "pattern": "tce_es_*.json"},
-    "SP": {"pasta": "Dados_SP", "parser": _parse_sp, "pattern": "tce_sp_*.json"},
-    "MG": {"pasta": "Dados_MG", "parser": _parse_mg, "pattern": "tce_mg_*.json"},
-    "RS": {"pasta": "Dados_RS", "parser": _parse_rs, "pattern": "tce_rs_*.json"},
-    "PR": {"pasta": "Dados_PR", "parser": _parse_pr, "pattern": "tce_pr_*.json"},
-    "SC": {"pasta": "Dados_SC", "parser": _parse_sc, "pattern": "tce_sc_*.json"},
-    "RJ": {"pasta": "Dados_RJ", "parser": _parse_rj, "pattern": "tce_rj_*.json"},
+    "ES": {"pasta": "Dados_ES", "leitor": _ler_jsons,  "parser": _parse_es, "pattern": "tce_es_*.json"},
+    "SP": {"pasta": "Dados_SP", "leitor": _ler_jsons,  "parser": _parse_sp, "pattern": "tce_sp_*.json"},
+    "MG": {"pasta": "",         "leitor": _ler_csv_mg, "parser": _parse_mg, "pattern": "Remuneracao_mg.csv"},
+    "RS": {"pasta": "Dados_RS", "leitor": _ler_jsons,  "parser": _parse_rs, "pattern": "tce_rs_*.json"},
+    "PR": {"pasta": "Dados_PR", "leitor": _ler_jsons,  "parser": _parse_pr, "pattern": "tce_pr_*.json"},
+    "SC": {"pasta": "Dados_SC", "leitor": _ler_jsons,  "parser": _parse_sc, "pattern": "tce_sc_*.json"},
+    "RJ": {"pasta": "Dados_RJ", "leitor": _ler_jsons,  "parser": _parse_rj, "pattern": "tce_rj_*.json"},
 }
 
-_FILE_YEAR_RE = re.compile(r"_(\d{4})\.json$")
 
-def _extract_year_from_filename(path: str) -> int:
-    m = _FILE_YEAR_RE.search(path)
-    return int(m.group(1)) if m else 0
+def _validar(estado: str, registros: list, registro: RegistroDescartes) -> list:
+    """Descarta registros sem chave válida, fora do recorte ou sem nenhum valor, registrando cada caso."""
+    validos, fora_do_recorte, sem_valores = [], Counter(), Counter()
+    for rec in registros:
+        chave = {"matricula": rec["matricula"], "ano": rec["ano"], "mes": rec["mes"], "folha": rec["folha"]}
+        if not rec["matricula"]:
+            registro.registrar(estado, "sem_matricula", {**chave, "nome": rec.get("nome")})
+        elif not (1 <= (rec["mes"] or 0) <= 12) or (rec["ano"] or 0) < 2000:
+            registro.registrar(estado, "competencia_invalida", chave)
+        elif rec["ano"] < ANO_INICIAL:
+            fora_do_recorte[rec["ano"]] += 1
+        elif all(rec[c] == 0 for c in CAMPOS_VALOR):
+            # Competência gravada sem nenhum valor (ex.: servidores desligados no RJ).
+            sem_valores[rec["ano"]] += 1
+        else:
+            validos.append(rec)
+    # Casos esperados e volumosos são registrados de forma agregada, por ano.
+    for ano, qtd in sorted(fora_do_recorte.items()):
+        registro.registrar(estado, "fora_do_recorte_temporal", {"ano": ano, "quantidade": qtd})
+    for ano, qtd in sorted(sem_valores.items()):
+        registro.registrar(estado, "competencia_sem_valores", {"ano": ano, "quantidade": qtd})
+    return validos
 
 
-def normalize_estado(estado: str) -> list:
-    cfg     = ESTADO_CONFIG[estado]
-    pasta   = BASE_DIR / cfg["pasta"]
-    parser  = cfg["parser"]
-    pattern = str(pasta / cfg["pattern"])
+def _deduplicar(estado: str, registros: list, registro: RegistroDescartes) -> list:
+    """Mantém um registro por (matrícula, ano, mês, folha); duplicatas idênticas e conflitos são registrados."""
+    vistos, saida, repeticoes = {}, [], Counter()
+    for rec in registros:
+        chave = (rec["matricula"], rec["ano"], rec["mes"], rec["folha"])
+        anterior = vistos.get(chave)
+        if anterior is None:
+            vistos[chave] = rec
+            saida.append(rec)
+        elif all(abs(anterior[c] - rec[c]) < 0.005 for c in CAMPOS_VALOR):
+            repeticoes[chave] += 1
+        else:
+            registro.registrar(estado, "conflito_de_chave", {
+                "chave": chave,
+                "mantido": {c: anterior[c] for c in CAMPOS_VALOR},
+                "descartado": {c: rec[c] for c in CAMPOS_VALOR},
+            })
+    for chave, qtd in repeticoes.items():
+        registro.registrar(estado, "duplicata_identica", {"chave": chave, "repeticoes": qtd})
+    return saida
 
-    arquivos = sorted(glob.glob(pattern))
-    if not arquivos:
-        print(f"  [AVISO] Nenhum arquivo encontrado em {pasta}")
-        return []
+
+def normalize_estado(estado: str, registro: RegistroDescartes) -> list:
+    cfg    = ESTADO_CONFIG[estado]
+    pasta  = BASE_DIR / cfg["pasta"]
+    parser = cfg["parser"]
 
     all_records = []
-    for filepath in arquivos:
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-        except json.JSONDecodeError as e:
-            print(f"  [ERRO] JSON inválido em {filepath}: {e}")
-            continue
+    try:
+        for nome_arquivo, raw in cfg["leitor"](pasta, cfg["pattern"]):
+            parsed = parser(raw, registro)
+            all_records.extend(parsed)
+            print(f"  ✓ {nome_arquivo}: {len(parsed):,} registros")
+    except (FileNotFoundError, json.JSONDecodeError) as erro:
+        registro.registrar(estado, "arquivo_ilegivel", {"erro": str(erro)})
+        print(f"  [ERRO] {estado}: {erro}")
 
-        if not isinstance(raw, list):
-            raw = [raw]
+    if not all_records:
+        print(f"  [AVISO] Nenhum registro obtido para {estado}")
+        return []
 
-        parsed = parser(raw)
-
-        file_year = _extract_year_from_filename(filepath)
-        for rec in parsed:
-            if rec["ano"] == 0 and file_year:
-                rec["ano"] = file_year
-
-        all_records.extend(parsed)
-        print(f"  ✓ {os.path.basename(filepath)}: {len(parsed):,} registros")
-
-    return all_records
+    validos = _validar(estado, all_records, registro)
+    return _deduplicar(estado, validos, registro)
 
 
 def run():
@@ -443,10 +538,11 @@ def run():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
 
+    registro = RegistroDescartes("normalizacao")
     todos = []
     for estado in ESTADO_CONFIG:
         print(f"\n-- Processando {estado} --")
-        registros = normalize_estado(estado)
+        registros = normalize_estado(estado, registro)
         todos.extend(registros)
 
         out_file = OUTPUT_DIR / f"remuneracoes_{estado.lower()}.json"
@@ -460,8 +556,11 @@ def run():
 
     print(f"\nTOTAL CONSOLIDADO: {len(todos):,} registros")
     print(f"Arquivo: {consolidado}")
+    registro.imprimir_resumo()
+    caminho_log = registro.salvar()
+    if caminho_log:
+        print(f"Log de descartes: {caminho_log}")
 
 
 if __name__ == "__main__":
     run()
-
