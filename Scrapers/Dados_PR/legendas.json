@@ -1,0 +1,85 @@
+{
+    "Aposentados": {
+        "codigoNatureza": "Aposentados",
+        "observacao": null,
+        "legendas": [
+            "[1] Vencimento do Cargo Efetivo e Verba de Representação, deduzidas eventuais faltas e insuficiência de jornada",
+            "[2] Adicionais por Tempo de Serviço",
+            "[3] Vantagens do Cargo em Comissão",
+            "[4] Auxílio Alimentação, Auxílio Saúde e Auxílio Creche",
+            "[5] Gratificações de Função e pelo Exercício de Encargos Especiais",
+            "[6] Adicional de férias, indenização de férias e indenização de licenças",
+            "[7] Gratificação de Assiduidade, diferenças de salários atrasados, 13º Salário e outras diferenças",
+            "[8] Abono de Permanência",
+            "[9] Total das vantagens (9 = 1 + 2 + 3 + 4 + 5 + 6 + 7+ 8)",
+            "[10] Parcela da remuneração mensal retida por exceder o teto remuneratório constitucional",
+            "[11] Contribuição previdenciária, inclusive para previdência complementar e imposto de renda retido na fonte",
+            "[12] Valor Líquido (12 = 9 - 10 - 11)"
+        ]
+    },
+    "AssessoriaMilitar": {
+        "codigoNatureza": "AssessoriaMilitar",
+        "observacao": "Função Privativa de Policial - FPP, nos termos da Lei nº 17.172, de 24 de maio de 2012 e da Lei nº 18.104, de 03 de junho de 2014.",
+        "legendas": [
+            "[1] Função Privativa de Policial - FPP",
+            "[2] Adicional de férias e indenização de férias",
+            "[3] Auxílio Alimentação, 13º Salário e diferenças de períodos anteriores",
+            "[4] Total das vantagens (4 = 1 + 2 + 3)",
+            "[5] Imposto de renda retido na fonte",
+            "[6] Valor Líquido (6 = 4 - 5)"
+        ]
+    },
+    "CargoComissao": {
+        "codigoNatureza": "CargoComissao",
+        "observacao": null,
+        "legendas": [
+            "[1] Sem benefícios a informar",
+            "[2] Sem benefícios a informar",
+            "[3] Vencimento básico, Gratificação de representação de gabinete e Gratificação de encargos especiais deduzidas eventuais faltas e insuficiência de jornada",
+            "[4] Auxílio Alimentação, Auxílio Saúde e Auxílio Creche",
+            "[5] Adicional de férias e indenização de férias",
+            "[6] Diferenças de salários atrasados e 13º salário",
+            "[7] Sem benefícios a informar",
+            "[8] Total das vantagens (8 = 1 + 2 + 3 + 4 + 5 + 6 + 7)",
+            "[9] Parcela da remuneração mensal retida por exceder o teto remuneratório constitucional",
+            "[10] Contribuição previdenciária e imposto de renda retido na fonte",
+            "[11] Valor Líquido (11 = 8 - 9 - 10)"
+        ]
+    },
+    "Efetivo": {
+        "codigoNatureza": "Efetivo",
+        "observacao": "A remuneração bruta dos servidores é limitada ao subsídio do Conselheiro nos termos na Lei Complementar Estadual nº 113/2005 (Art. 176). O Subsídio do Conselheiro corresponde a 90,25% do valor do Subsídio do Ministro do Supremo Tribunal Federal - STF. Não estão sujeitos ao teto salarial o Abono de Férias, o Abono de Permanência e os Auxílios.",
+        "legendas": [
+            "[1] Vencimento do Cargo Efetivo e Verba de Representação, deduzidas eventuais faltas e insuficiência de jornada",
+            "[2] Adicionais por Tempo de Serviço",
+            "[3] Vantagens do Cargo em Comissão",
+            "[4] Auxílio Alimentação, Auxílio Saúde e Auxílio Creche",
+            "[5] Gratificações de Função e pelo Exercício de Encargos Especiais",
+            "[6] Adicional de férias, indenização de férias e indenização de licenças",
+            "[7.1] Gratificação de Assiduidade, diferenças de salários atrasados, 13º Salário e outras diferenças",
+            "[7.2] Benefício referente incentivo à migração ao Regime de Previdência Complementar, conforme Lei Estadual nº 20.777, de 16 de novembro de 2021 (a partir de 04/2026)",
+            "[8] Abono de Permanência",
+            "[9] Total das vantagens (9 = 1 + 2 + 3 + 4 + 5 + 6 + 7+ 8)",
+            "[10] Parcela da remuneração mensal retida por exceder o teto remuneratório constitucional",
+            "[11] Contribuição previdenciária, inclusive para previdência complementar e imposto de renda retido na fonte",
+            "[12] Valor Líquido (12 = 9 - 10 - 11)"
+        ]
+    },
+    "Membros": {
+        "codigoNatureza": "Membros",
+        "observacao": "A Remuneração dos Membros (Conselheiros, Conselheiros Substitutos e Procuradores) é limitada ao valor do Subsídio do Ministro do Supremo Tribunal Federal, nos termos da Emenda Constitucional nº 41/03. Não estão sujeitos ao Teto Salarial o pagamento de Abono de Férias, do Abono de Permanência e os auxílios alimentação, saúde e creche, conforme previsto na Resolução nº 13/2006 – CNJ e alterações.",
+        "legendas": [
+            "[1] Subsídio e diferenças de subsídio",
+            "[2] Parcela de Valorização por Tempo de Antiguidade na Carreira – PVTAC",
+            "[3] Sem benefícios a informar",
+            "[4] Auxílio Alimentação, Auxílio Saúde e Auxílio Creche",
+            "[5] Adicional de férias, indenização de férias e indenização de licenças",
+            "[6] Gratificações pelo exercício da Presidência, Vice, Corregedoria, Superintendência ou da Procuradoria Geral, 13º Salário e outras diferenças",
+            "[7] Abono de Permanência",
+            "[8] Total das vantagens (8 = 1 + 2 + 3 + 4 + 5 + 6 + 7)",
+            "[9] Parcela da remuneração mensal retida por exceder o teto remuneratório constitucional",
+            "[10] Contribuição previdenciária, inclusive para previdência complementar e imposto de renda retido na fonte",
+            "[11] Valor Líquido (11 = 8 - 9 - 10)"
+        ]
+    }
+}

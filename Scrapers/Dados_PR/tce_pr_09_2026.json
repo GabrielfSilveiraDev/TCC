@@ -1,0 +1,26 @@
+[
+    {
+        "periodo_folha": "2026.09 Suplementar I",
+        "natureza": "Efetivo",
+        "natureza_descricao": "Efetivos",
+        "matricula": "50.628-1",
+        "nome": "MARCELO EVANDRO JOHNSSON",
+        "cargo": "AUDITOR DE CONTROLE EXTERNO - I11",
+        "cargo_comissionado": "COORDENADOR EQUIPE AUDITORIA-EE2",
+        "lotacao": "1ICE",
+        "financeiro": {
+            "Vantagens Fixas [1]": 0.0,
+            "Vantagens Pessoais [2]": 0.0,
+            "Cargo em Comissão [3]": 0.0,
+            "Beneficios [4]": 0.0,
+            "Funções e Encargos Especiais [5]": 8822.24,
+            "Férias e Licenças [6]": 0.0,
+            "Outras Vantagens Transitórias [7]": 0.0,
+            "Abono de Permanência [8]": 0.0,
+            "Total Bruto [9]": 8822.24,
+            "Redutor Constitucional [10]": 4411.12,
+            "Descontos Obrigatórios [11]": -2730.44,
+            "Valor Líquido [12]": 10502.92
+        }
+    }
+]
