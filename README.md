@@ -71,28 +71,28 @@ classDiagram
     SeleniumScraper <|-- ScraperRS
 ```
 
-- **`BaseScraper`** (classe abstrata): `run()` define o fluxo comum a todos os tribunais (padrão *Template Method*). Ele registra o início, chama `scrape()`, que cada coletor implementa, captura e registra qualquer erro não tratado, loga a duração e sempre chama `shutdown()` para liberar recursos. A classe também concentra o log com timestamp, a gravação de JSON (`save_data`), a gravação incremental com deduplicação (`save_data_merge`) e o checkpoint em `progress.json`.
+- **`BaseScraper`** (classe abstrata): `run()` define o fluxo comum a todos os tribunais (padrão *Template Method*). Ele registra o início, chama `scrape()` (implementado por cada coletor), captura e registra qualquer erro não tratado, informa a duração no log e sempre chama `shutdown()` para liberar recursos. A classe também concentra o log com timestamp, a gravação de JSON (`save_data`), a gravação incremental com deduplicação (`save_data_merge`) e o checkpoint em `progress.json`.
 - **`RequestsScraper`**: cria uma `requests.Session` com `User-Agent` de navegador e retry automático do `urllib3` nos adaptadores HTTP e HTTPS, com `Retry(total=5, backoff_factor=10, status_forcelist=[429, 500, 502, 503, 504])`, ou seja, até 5 novas tentativas com backoff exponencial.
 - **`SeleniumScraper`**: inicia o Chrome (headless por padrão, com `--no-sandbox` e `--disable-dev-shm-usage`) e aponta a pasta de downloads para a pasta de saída do tribunal, que é por onde o coletor de MG recebe os arquivos exportados pelo portal. `shutdown()` fecha o navegador.
 
 ### Requests ou Selenium
 
-Os portais que respondem a requisições HTTP diretas (ES, RJ, SC e SP) usam `RequestsScraper`, com o HTML interpretado por BeautifulSoup. Os de MG (PrimeFaces), PR e RS (Oracle APEX), cujos formulários são montados por JavaScript/AJAX, usam `SeleniumScraper`.
+Os portais que respondem a requisições HTTP diretas (ES, RJ, SC e SP) usam `RequestsScraper`, com o HTML interpretado por BeautifulSoup. Os de MG, PR e RS, cujos formulários são montados por JavaScript/AJAX (o de MG usa PrimeFaces e o do RS, Oracle APEX), usam `SeleniumScraper`.
 
 - **TCE-ES**: um POST lista os servidores por situação (ativo e inativo). A página de cada servidor traz o histórico de créditos e descontos em JSON, dentro de campos `input` ocultos, e o coletor agrupa esses lançamentos por competência a partir de 2020.
 - **TCE-MG**: roda com o navegador visível e **exige que uma pessoa resolva o reCAPTCHA** (o coletor espera até 5 minutos). Na fase 1, enfileira no portal uma exportação JSON por competência, de 09/2025 retroativamente até 01/2020. Na fase 2, baixa os arquivos pelo modal "Gerenciar downloads" e os renomeia para `tce_mg_MM_AAAA.json`. O conteúdo é o JSON exportado pelo próprio portal.
 - **TCE-PR**: para cada competência a partir de 2020 e cada natureza disponível no formulário (por exemplo, "Efetivos"), pagina os resultados e extrai os valores com BeautifulSoup.
 - **TCE-RJ**: o portal mantém a sessão em um token na URL. O coletor abre a sessão em três passos (página inicial, "Filtrar" e listagem sem paginação), lista todos os servidores e, para cada matrícula, consulta as competências disponíveis e faz um POST por competência.
 - **TCE-RS**: percorre as situações (ativos, inativos e exonerados) página a página, abre cada servidor em outra aba e lê cada competência do seletor de período. É o único coletor que lê a variável de ambiente `TARGET_YEAR` para coletar apenas um ano.
-- **TCE-SC**: um POST por competência e categoria (ativo, inativo, pensionista e estagiário) retorna a lista de servidores, e o contracheque de cada um vem de um endpoint que responde em JSON. O coletor espera 0,25 s entre requisições.
+- **TCE-SC**: um POST por competência e categoria (ativo, inativo, pensionista e estagiário) retorna a lista de servidores, e o contracheque de cada um vem de um endpoint que responde em JSON. O coletor espera 0,25 s entre uma consulta de contracheque e outra.
 - **TCE-SP**: faz GET paginado por ano, mês, situação (ativo e inativo) e identificação (servidor, membro e residente-bolsista). O portal identifica os anos por IDs internos, mapeados em `mapa_anos` apenas para 2021–2026; por isso a série de SP começa em 2021.
 
 ### Retentativas
 
 Além do retry da sessão HTTP, alguns coletores têm retentativas próprias. Elas cobrem casos que o `Retry` do `urllib3` não trata: por padrão, ele não repete requisições POST por status HTTP e não tem como renovar a sessão de um portal.
 
-- **SC**: em 403, 429 ou 5xx, espera 300 s e repete, sem limite de tentativas. Em erro de conexão, espera 30 s.
-- **RJ**: até 3 tentativas por requisição e também para abrir a sessão. Espera 30 s em conexão recusada e 10 s em timeout ou outros erros HTTP. Em 404 ou timeout, renova a sessão antes de tentar de novo.
+- **SC**: na consulta do contracheque, em 403, 429, 500, 502, 503 ou 504, espera 300 s e repete, sem limite de tentativas. Em erro de conexão, espera 30 s e repete.
+- **RJ**: até 3 tentativas por requisição e também para abrir a sessão. Nas requisições, espera 30 s em erro de conexão e 10 s em timeout ou outros erros HTTP; em 404 ou timeout, renova a sessão antes de tentar de novo.
 - **SP**: em erro de conexão, espera 30 s e repete a mesma página.
 - **MG**: até 3 tentativas para acionar a exportação. Se a seleção de um filtro falha, recarrega a página e pula a competência.
 - **PR**: se as naturezas de uma competência não carregam, recarrega a página e tenta mais uma vez.
@@ -105,14 +105,14 @@ Cada coletor grava um checkpoint em `Dados_<UF>/progress.json` e, quando executa
 | Tribunal | O que o checkpoint guarda | Quando é salvo |
 |---|---|---|
 | ES, RJ | matrículas já processadas | a cada 50 servidores e ao final |
-| RS | URLs de servidores já processadas | a cada 20 servidores e ao final |
+| RS | URLs de servidores já processadas | a cada 20 servidores e ao final, se ainda houver dados a gravar |
 | PR | competências já processadas | a cada competência |
 | SC, SP | último ano/mês concluído | a cada competência |
 | MG | competências já baixadas (também pula a competência se o arquivo do mês já existe) | a cada arquivo baixado |
 
-ES, PR, RJ e RS gravam com `save_data_merge`, que junta os novos registros ao arquivo do mês e descarta duplicatas pela chave de cada tribunal (por exemplo, `matricula` + `mes_ano` no ES e no RJ). Assim, uma execução interrompida só refaz o lote que estava em andamento.
+ES, PR, RJ e RS gravam com `save_data_merge`, que acrescenta ao arquivo do mês apenas os registros cuja chave ainda não está nele (por exemplo, `matricula` + `mes_ano` no ES e no RJ). Assim, uma execução interrompida só refaz o lote que estava em andamento.
 
-Os `progress.json` estão versionados junto com os dados (exceto o do PR), então uma nova execução, local ou no GitHub Actions, continua a partir do checkpoint commitado. Para coletar um tribunal do zero, apague o `progress.json` da pasta correspondente (no MG, apague também os arquivos mensais).
+Os `progress.json` estão versionados junto com os dados (exceto o do PR), então uma nova execução, local ou no GitHub Actions, continua a partir do checkpoint commitado. Para coletar um tribunal do zero, apague o `progress.json` e os arquivos mensais da pasta correspondente: no MG, um arquivo já existente faz a competência ser pulada, e no ES, PR, RJ e RS o `save_data_merge` mantém os registros já gravados em vez de substituí-los.
 
 ## Como executar localmente
 
